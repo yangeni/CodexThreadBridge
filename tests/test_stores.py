@@ -205,3 +205,63 @@ def test_list_artifacts_without_alias_returns_all(bridge_config) -> None:
     artifacts = store.list_artifacts()
 
     assert [artifact["id"] for artifact in artifacts] == [first_id, second_id]
+
+
+def test_record_and_get_latest_artifact_run(bridge_config) -> None:
+    store = BridgeStore(bridge_config.sqlite_path)
+    store.initialize()
+
+    assert store.get_latest_artifact_run("code") is None
+
+    store.record_artifact_run(
+        alias="code",
+        run_id="run-1",
+        session_id="019-code",
+    )
+    store.record_artifact_run(
+        alias="code",
+        run_id="run-2",
+        session_id="019-code",
+    )
+
+    assert store.get_latest_artifact_run("code") == "run-2"
+
+
+def test_rebinding_or_removing_alias_clears_latest_artifact_run(bridge_config) -> None:
+    store = BridgeStore(bridge_config.sqlite_path)
+    store.initialize()
+
+    store.upsert_alias(
+        alias="code",
+        session_id="session-old",
+        label="Code",
+        default_cwd="/tmp/code-old",
+        policy=ExecutionPolicy.work_default("/tmp/code-old"),
+        created_by="owner-1",
+    )
+    store.record_artifact_run(
+        alias="code",
+        run_id="run-old",
+        session_id="session-old",
+    )
+
+    store.upsert_alias(
+        alias="code",
+        session_id="session-new",
+        label="Code",
+        default_cwd="/tmp/code-new",
+        policy=ExecutionPolicy.work_default("/tmp/code-new"),
+        created_by="owner-1",
+    )
+
+    assert store.get_latest_artifact_run("code") is None
+
+    store.record_artifact_run(
+        alias="code",
+        run_id="run-new",
+        session_id="session-new",
+    )
+    assert store.get_latest_artifact_run("code") == "run-new"
+
+    assert store.remove_alias("code") is True
+    assert store.get_latest_artifact_run("code") is None

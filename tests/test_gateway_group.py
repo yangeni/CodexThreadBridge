@@ -188,6 +188,24 @@ def test_group_work_command_is_forbidden_even_after_approval(tmp_path: Path) -> 
     assert len(controller.starts) == 1
 
 
+def test_group_artifact_commands_are_forbidden_even_after_approval(tmp_path: Path) -> None:
+    gateway, _config, _store, controller = _gateway_for(tmp_path)
+
+    gateway.handle(group_msg("@Bot hello", raw_ref="m-group-pending"))
+    gateway.handle(owner_private("/group approve group-1 friends", raw_ref="m-owner-approve"))
+
+    artifacts_reply = gateway.handle(
+        group_msg("@Bot /artifacts", raw_ref="m-group-artifacts")
+    )
+    sendfile_reply = gateway.handle(
+        group_msg("@Bot /sendfile 1", raw_ref="m-group-sendfile")
+    )
+
+    assert "cannot dispatch" in artifacts_reply.text
+    assert "cannot dispatch" in sendfile_reply.text
+    assert len(controller.starts) == 1
+
+
 def test_approved_group_chatter_is_ignored_without_controller_call(tmp_path: Path) -> None:
     gateway, _config, _store, controller = _gateway_for(tmp_path)
 

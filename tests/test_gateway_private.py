@@ -421,3 +421,403 @@ def test_private_status_uses_active_alias_without_dispatch(tmp_path: Path) -> No
     assert "reconcile_required=True" in reply.text
     assert "session_head=head-active" in reply.text
     assert controller.starts == []
+
+
+def test_private_artifacts_lists_allowed_result_from_dispatch(tmp_path: Path) -> None:
+    gateway, _config, _store, controller = _gateway_for(tmp_path)
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    report_path = export_dir / "report.md"
+    controller.status_by_session["019-code"] = _ready_status(
+        cwd="/tmp/codex-target/code"
+    )
+    gateway.handle(private_msg("/add code 019-code"))
+    gateway.handle(private_msg("/use code"))
+
+    def _start_or_send(**kwargs):
+        controller.starts.append(kwargs)
+        report_path.write_text("# Report\n", encoding="utf-8")
+        return ControllerRunResult(
+            run_id="run-1",
+            session_id="019-code",
+            session_head="head-2",
+            status="completed",
+            text="Created %s" % report_path,
+            approval_summary=None,
+        )
+
+    controller.start_or_send = _start_or_send
+
+    gateway.handle(private_msg("continue implementation"))
+    reply = gateway.handle(private_msg("/artifacts code"))
+
+    assert "allowed" in reply.text
+    assert str(report_path.resolve()) in reply.text
+
+
+def test_private_artifacts_without_active_alias_requires_use_guidance(tmp_path: Path) -> None:
+    gateway, _config, _store, _controller = _gateway_for(tmp_path)
+
+    reply = gateway.handle(private_msg("/artifacts"))
+
+    assert reply.text == "No active thread. Use /use <alias> first."
+
+
+def test_private_artifacts_unknown_alias_is_rejected(tmp_path: Path) -> None:
+    gateway, _config, _store, _controller = _gateway_for(tmp_path)
+
+    reply = gateway.handle(private_msg("/artifacts missing"))
+
+    assert reply.text == "Unknown alias: missing"
+
+
+def test_private_artifacts_without_alias_uses_current_active_alias_scope(tmp_path: Path) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    controller.status_by_session["019-code"] = _ready_status(cwd="/tmp/codex-target/code")
+    controller.status_by_session["019-paper"] = _ready_status(cwd="/tmp/codex-target/paper")
+    gateway.handle(private_msg("/add code 019-code"))
+    gateway.handle(private_msg("/add paper 019-paper"))
+    gateway.handle(private_msg("/use code"))
+
+    code_path = str((tmp_path / "exports" / "code.md").resolve())
+    paper_path = str((tmp_path / "exports" / "paper.md").resolve())
+    store.record_artifact(
+        run_id="run-code",
+        alias="code",
+        session_id="019-code",
+        local_path=code_path,
+        mime_type="application/octet-stream",
+        size_bytes=4,
+        status="allowed",
+        reason="within allowed artifact roots",
+    )
+    store.record_artifact(
+        run_id="run-paper",
+        alias="paper",
+        session_id="019-paper",
+        local_path=paper_path,
+        mime_type="application/octet-stream",
+        size_bytes=5,
+        status="allowed",
+        reason="within allowed artifact roots",
+    )
+
+    reply = gateway.handle(private_msg("/artifacts"))
+
+    assert code_path in reply.text
+    assert paper_path not in reply.text
+
+
+def test_private_artifacts_lists_only_latest_run_for_alias(tmp_path: Path) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    controller.status_by_session["019-code"] = _ready_status(cwd="/tmp/codex-target/code")
+    gateway.handle(private_msg("/add code 019-code"))
+    gateway.handle(private_msg("/use code"))
+
+    older_path = str((tmp_path / "exports" / "older.md").resolve())
+    latest_path = str((tmp_path / "exports" / "latest.md").resolve())
+    store.record_artifact(
+        run_id="run-old",
+        alias="code",
+        session_id="019-code",
+        local_path=older_path,
+        mime_type="application/octet-stream",
+        size_bytes=4,
+        status="allowed",
+        reason="within allowed artifact roots",
+    )
+    store.record_artifact(
+        run_id="run-new",
+        alias="code",
+        session_id="019-code",
+        local_path=latest_path,
+        mime_type="application/octet-stream",
+        size_bytes=5,
+        status="allowed",
+        reason="within allowed artifact roots",
+    )
+
+    reply = gateway.handle(private_msg("/artifacts"))
+
+    assert latest_path in reply.text
+    assert older_path not in reply.text
+
+
+def test_private_sendfile_returns_placeholder_for_allowed_artifact(tmp_path: Path) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    controller.status_by_session["019-code"] = _ready_status(cwd="/tmp/codex-target/code")
+    gateway.handle(private_msg("/add code 019-code"))
+    gateway.handle(private_msg("/use code"))
+    artifact_id = store.record_artifact(
+        run_id="run-1",
+        alias="code",
+        session_id="019-code",
+        local_path=str((tmp_path / "exports" / "report.md").resolve()),
+        mime_type="application/octet-stream",
+        size_bytes=7,
+        status="allowed",
+        reason="within allowed artifact roots",
+    )
+
+    reply = gateway.handle(private_msg("/sendfile %s" % artifact_id))
+
+    assert "would send" in reply.text.lower()
+    assert str(artifact_id) in reply.text
+
+
+def test_private_sendfile_all_uses_only_allowed_artifacts_from_latest_run(tmp_path: Path) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    controller.status_by_session["019-code"] = _ready_status(cwd="/tmp/codex-target/code")
+    gateway.handle(private_msg("/add code 019-code"))
+    gateway.handle(private_msg("/use code"))
+
+    older_allowed_path = str((tmp_path / "exports" / "older-allowed.md").resolve())
+    latest_allowed_path = str((tmp_path / "exports" / "latest-allowed.md").resolve())
+    latest_blocked_path = str((tmp_path / "exports" / "latest-blocked.md").resolve())
+    store.record_artifact(
+        run_id="run-old",
+        alias="code",
+        session_id="019-code",
+        local_path=older_allowed_path,
+        mime_type="application/octet-stream",
+        size_bytes=4,
+        status="allowed",
+        reason="within allowed artifact roots",
+    )
+    latest_allowed_id = store.record_artifact(
+        run_id="run-new",
+        alias="code",
+        session_id="019-code",
+        local_path=latest_allowed_path,
+        mime_type="application/octet-stream",
+        size_bytes=5,
+        status="allowed",
+        reason="within allowed artifact roots",
+    )
+    store.record_artifact(
+        run_id="run-new",
+        alias="code",
+        session_id="019-code",
+        local_path=latest_blocked_path,
+        mime_type="application/octet-stream",
+        size_bytes=6,
+        status="blocked",
+        reason="outside allowed artifact roots",
+    )
+
+    reply = gateway.handle(private_msg("/sendfile all"))
+
+    assert "would send" in reply.text.lower()
+    assert str(latest_allowed_id) in reply.text
+    assert latest_allowed_path in reply.text
+    assert older_allowed_path not in reply.text
+    assert latest_blocked_path not in reply.text
+
+
+def test_private_sendfile_without_active_alias_requires_use_guidance(tmp_path: Path) -> None:
+    gateway, _config, _store, _controller = _gateway_for(tmp_path)
+
+    reply = gateway.handle(private_msg("/sendfile 1"))
+
+    assert reply.text == "No active thread. Use /use <alias> first."
+
+
+def test_private_sendfile_rejects_artifact_from_different_alias(tmp_path: Path) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    controller.status_by_session["019-code"] = _ready_status(cwd="/tmp/codex-target/code")
+    controller.status_by_session["019-paper"] = _ready_status(cwd="/tmp/codex-target/paper")
+    gateway.handle(private_msg("/add code 019-code"))
+    gateway.handle(private_msg("/add paper 019-paper"))
+    gateway.handle(private_msg("/use code"))
+    paper_artifact_id = store.record_artifact(
+        run_id="run-paper",
+        alias="paper",
+        session_id="019-paper",
+        local_path=str((tmp_path / "exports" / "paper.md").resolve()),
+        mime_type="application/octet-stream",
+        size_bytes=5,
+        status="allowed",
+        reason="within allowed artifact roots",
+    )
+
+    reply = gateway.handle(private_msg("/sendfile %s" % paper_artifact_id))
+
+    assert "would send" not in reply.text.lower()
+    assert "artifact not found" in reply.text.lower()
+
+
+def test_private_sendfile_all_rejects_when_latest_run_has_no_allowed_artifacts(
+    tmp_path: Path,
+) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    controller.status_by_session["019-code"] = _ready_status(cwd="/tmp/codex-target/code")
+    gateway.handle(private_msg("/add code 019-code"))
+    gateway.handle(private_msg("/use code"))
+
+    store.record_artifact(
+        run_id="run-old",
+        alias="code",
+        session_id="019-code",
+        local_path=str((tmp_path / "exports" / "older-allowed.md").resolve()),
+        mime_type="application/octet-stream",
+        size_bytes=4,
+        status="allowed",
+        reason="within allowed artifact roots",
+    )
+    store.record_artifact(
+        run_id="run-new",
+        alias="code",
+        session_id="019-code",
+        local_path=str((tmp_path / "exports" / "latest-blocked.md").resolve()),
+        mime_type="application/octet-stream",
+        size_bytes=6,
+        status="blocked",
+        reason="outside allowed artifact roots",
+    )
+
+    reply = gateway.handle(private_msg("/sendfile all"))
+
+    assert "Rejected" in reply.text
+    assert "no allowed artifacts" in reply.text.lower()
+
+
+def test_private_latest_run_without_detected_artifacts_hides_older_artifacts(
+    tmp_path: Path,
+) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    controller.status_by_session["019-code"] = _ready_status(cwd="/tmp/codex-target/code")
+    gateway.handle(private_msg("/add code 019-code"))
+    gateway.handle(private_msg("/use code"))
+    old_id = store.record_artifact(
+        run_id="run-old",
+        alias="code",
+        session_id="019-code",
+        local_path=str((tmp_path / "exports" / "older-allowed.md").resolve()),
+        mime_type="application/octet-stream",
+        size_bytes=4,
+        status="allowed",
+        reason="within allowed artifact roots",
+    )
+
+    def _start_or_send(**kwargs):
+        controller.starts.append(kwargs)
+        return ControllerRunResult(
+            run_id="run-new-empty",
+            session_id="019-code",
+            session_head="head-2",
+            status="completed",
+            text="Completed without artifact paths.",
+            approval_summary=None,
+        )
+
+    controller.start_or_send = _start_or_send
+
+    dispatch_reply = gateway.handle(private_msg("continue implementation"))
+    artifacts_reply = gateway.handle(private_msg("/artifacts"))
+    send_all_reply = gateway.handle(private_msg("/sendfile all"))
+    send_old_reply = gateway.handle(private_msg("/sendfile %s" % old_id))
+
+    assert dispatch_reply.text == "Completed without artifact paths."
+    assert artifacts_reply.text == "No artifacts."
+    assert "no allowed artifacts" in send_all_reply.text.lower()
+    assert "artifact not found" in send_old_reply.text.lower()
+
+
+def test_private_sendfile_rejects_when_active_alias_no_longer_exists(tmp_path: Path) -> None:
+    gateway, config, _store, controller = _gateway_for(tmp_path)
+    controller.status_by_session["019-code"] = _ready_status(cwd="/tmp/codex-target/code")
+    gateway.handle(private_msg("/add code 019-code"))
+    gateway.handle(private_msg("/use code"))
+    with sqlite3.connect(config.sqlite_path) as connection:
+        connection.execute(
+            "DELETE FROM thread_aliases WHERE alias = ?",
+            ("code",),
+        )
+
+    send_all_reply = gateway.handle(private_msg("/sendfile all"))
+    send_one_reply = gateway.handle(private_msg("/sendfile 1"))
+
+    assert "no longer exists" in send_all_reply.text.lower()
+    assert "no longer exists" in send_one_reply.text.lower()
+
+
+def test_private_sendfile_rejects_blocked_artifact(tmp_path: Path) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    controller.status_by_session["019-code"] = _ready_status(cwd="/tmp/codex-target/code")
+    gateway.handle(private_msg("/add code 019-code"))
+    gateway.handle(private_msg("/use code"))
+    artifact_id = store.record_artifact(
+        run_id="run-1",
+        alias="code",
+        session_id="019-code",
+        local_path="/tmp/blocked.txt",
+        mime_type="application/octet-stream",
+        size_bytes=3,
+        status="blocked",
+        reason="outside allowed artifact roots",
+    )
+
+    list_reply = gateway.handle(private_msg("/artifacts code"))
+    send_reply = gateway.handle(private_msg("/sendfile %s" % artifact_id))
+
+    assert "blocked" in list_reply.text
+    assert "Rejected" in send_reply.text
+    assert "outside allowed artifact roots" in send_reply.text
+
+
+def test_private_artifacts_and_sendfile_ignore_old_session_after_alias_rebind(
+    tmp_path: Path,
+) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    controller.status_by_session["session-old"] = _ready_status(cwd="/tmp/codex-target/old")
+    controller.status_by_session["session-new"] = _ready_status(cwd="/tmp/codex-target/new")
+
+    gateway.handle(private_msg("/add code session-old"))
+    gateway.handle(private_msg("/use code"))
+    old_path = str((tmp_path / "exports" / "old.md").resolve())
+    old_id = store.record_artifact(
+        run_id="run-old",
+        alias="code",
+        session_id="session-old",
+        local_path=old_path,
+        mime_type="application/octet-stream",
+        size_bytes=4,
+        status="allowed",
+        reason="within allowed artifact roots",
+    )
+    store.record_artifact_run(
+        alias="code",
+        run_id="run-old",
+        session_id="session-old",
+    )
+
+    gateway.handle(private_msg("/add code session-new"))
+    gateway.handle(private_msg("/use code"))
+
+    artifacts_after_rebind = gateway.handle(private_msg("/artifacts"))
+    send_old_after_rebind = gateway.handle(private_msg("/sendfile %s" % old_id))
+
+    assert artifacts_after_rebind.text == "No artifacts."
+    assert "artifact not found" in send_old_after_rebind.text.lower()
+
+    new_path = str((tmp_path / "exports" / "new.md").resolve())
+    store.record_artifact(
+        run_id="run-new",
+        alias="code",
+        session_id="session-new",
+        local_path=new_path,
+        mime_type="application/octet-stream",
+        size_bytes=5,
+        status="allowed",
+        reason="within allowed artifact roots",
+    )
+    store.record_artifact_run(
+        alias="code",
+        run_id="run-new",
+        session_id="session-new",
+    )
+
+    artifacts_after_new = gateway.handle(private_msg("/artifacts"))
+
+    assert new_path in artifacts_after_new.text
+    assert old_path not in artifacts_after_new.text

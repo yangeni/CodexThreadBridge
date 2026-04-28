@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import time
 from typing import Optional
 
+from codex_thread_bridge.artifacts import ArtifactService
 from codex_thread_bridge.commands import CommandKind, parse_command
 from codex_thread_bridge.models import (
     ConversationType,
@@ -18,6 +20,7 @@ class Gateway:
         self.store = store
         self.controller = controller
         self.policy = PolicyEngine(config)
+        self.artifacts = ArtifactService(config)
 
     def handle(self, msg: IncomingMessage) -> OutgoingMessage:
         if msg.conversation_type == ConversationType.GROUP:
@@ -76,6 +79,12 @@ class Gateway:
         if parsed.kind == CommandKind.STATUS:
             return self._handle_status(msg, parsed.args)
 
+        if parsed.kind == CommandKind.ARTIFACTS:
+            return self._handle_artifacts(msg, parsed.args)
+
+        if parsed.kind == CommandKind.SEND_FILE:
+            return self._handle_sendfile(msg, parsed.args[0])
+
         if parsed.kind == CommandKind.GROUP_APPROVE:
             return self._handle_group_approve(msg, parsed.args)
 
@@ -130,6 +139,7 @@ class Gateway:
                 "%s is not ready. Run /status %s." % (alias.alias, alias.alias),
             )
 
+        run_started_at = time.time()
         result = self.controller.start_or_send(
             session_id=alias.session_id,
             cwd=alias.default_cwd,
@@ -139,6 +149,22 @@ class Gateway:
             idempotency_key="%s:%s" % (msg.raw_ref, alias.alias),
             expected_session_head=status.get("session_head"),
         )
+        self.store.record_artifact_run(
+            alias=alias.alias,
+            run_id=result.run_id,
+            session_id=result.session_id,
+        )
+        for candidate in self.artifacts.detect(result.text, run_started_at):
+            self.store.record_artifact(
+                run_id=result.run_id,
+                alias=alias.alias,
+                session_id=result.session_id,
+                local_path=str(candidate.path),
+                mime_type=candidate.mime_type,
+                size_bytes=candidate.size_bytes,
+                status=candidate.status,
+                reason=candidate.reason,
+            )
         if result.approval_summary:
             return OutgoingMessage(msg.conversation_id, result.approval_summary)
         return OutgoingMessage(msg.conversation_id, result.text)
@@ -371,6 +397,115 @@ class Gateway:
             )
         )
         return OutgoingMessage(msg.conversation_id, text)
+
+    def _handle_artifacts(
+        self, msg: IncomingMessage, args: tuple[str, ...]
+    ) -> OutgoingMessage:
+        alias_name = self._artifact_alias_from_args(msg, args)
+        if alias_name is None:
+            return OutgoingMessage(
+                msg.conversation_id,
+                "No active thread. Use /use <alias> first.",
+            )
+        alias = self.store.get_alias(alias_name)
+        if alias is None:
+            return OutgoingMessage(
+                msg.conversation_id,
+                "Unknown alias: %s" % alias_name,
+            )
+        artifacts = self._latest_run_artifacts(alias_name, alias.session_id)
+        if not artifacts:
+            return OutgoingMessage(msg.conversation_id, "No artifacts.")
+        lines = []
+        for artifact in artifacts:
+            lines.append(
+                "%s %s %s"
+                % (
+                    artifact["id"],
+                    artifact["status"],
+                    artifact["local_path"],
+                )
+            )
+        return OutgoingMessage(msg.conversation_id, "\n".join(lines))
+
+    def _handle_sendfile(self, msg: IncomingMessage, artifact_id: str) -> OutgoingMessage:
+        alias_name = self._artifact_alias_from_args(msg, ())
+        if alias_name is None:
+            return OutgoingMessage(
+                msg.conversation_id,
+                "No active thread. Use /use <alias> first.",
+            )
+        alias = self.store.get_alias(alias_name)
+        if alias is None:
+            return OutgoingMessage(
+                msg.conversation_id,
+                "Active alias no longer exists: %s" % alias_name,
+            )
+        latest_artifacts = self._latest_run_artifacts(alias_name, alias.session_id)
+        if artifact_id == "all":
+            allowed_artifacts = [
+                artifact
+                for artifact in latest_artifacts
+                if str(artifact.get("status")) == "allowed"
+            ]
+            if not allowed_artifacts:
+                return OutgoingMessage(
+                    msg.conversation_id,
+                    "Rejected: latest run has no allowed artifacts.",
+                )
+            lines = [
+                "Would send artifact %s: %s"
+                % (artifact["id"], artifact["local_path"])
+                for artifact in allowed_artifacts
+            ]
+            return OutgoingMessage(msg.conversation_id, "\n".join(lines))
+        artifact = self._find_artifact(latest_artifacts, artifact_id)
+        if artifact is None:
+            return OutgoingMessage(
+                msg.conversation_id,
+                "Rejected: artifact not found: %s" % artifact_id,
+            )
+        if str(artifact["status"]) != "allowed":
+            return OutgoingMessage(
+                msg.conversation_id,
+                "Rejected: artifact %s is %s (%s)"
+                % (artifact["id"], artifact["status"], artifact["reason"]),
+            )
+        return OutgoingMessage(
+            msg.conversation_id,
+            "Would send artifact %s: %s"
+            % (artifact["id"], artifact["local_path"]),
+        )
+
+    def _find_artifact(self, artifacts: list[dict], artifact_id: str) -> Optional[dict]:
+        for artifact in artifacts:
+            if str(artifact.get("id")) == artifact_id:
+                return artifact
+        return None
+
+    def _latest_run_artifacts(self, alias_name: str, session_id: str) -> list[dict]:
+        artifacts = [
+            artifact
+            for artifact in self.store.list_artifacts(alias_name)
+            if str(artifact.get("session_id")) == str(session_id)
+        ]
+        latest_run_id = self.store.get_latest_artifact_run(alias_name)
+        if latest_run_id is None:
+            if not artifacts:
+                return []
+            latest_run_id = str(artifacts[-1]["run_id"])
+        return [
+            artifact
+            for artifact in artifacts
+            if str(artifact.get("run_id")) == str(latest_run_id)
+        ]
+
+    def _artifact_alias_from_args(
+        self, msg: IncomingMessage, args: tuple[str, ...]
+    ) -> Optional[str]:
+        if args:
+            return args[0]
+        return self.store.get_active_alias(msg.context_key)
 
     def _workspace_from_status(self, status: dict) -> Optional[str]:
         for key in ("cwd", "workspace_root", "project_root", "default_cwd"):

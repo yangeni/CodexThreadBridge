@@ -75,6 +75,13 @@ class BridgeStore:
                     created_at INTEGER NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS artifact_runs (
+                    alias TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_type TEXT NOT NULL,
@@ -95,6 +102,10 @@ class BridgeStore:
     ) -> None:
         now = self._now()
         with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT session_id FROM thread_aliases WHERE alias = ?",
+                (alias,),
+            ).fetchone()
             connection.execute(
                 """
                 INSERT INTO thread_aliases (
@@ -137,6 +148,11 @@ class BridgeStore:
                     now,
                 ),
             )
+            if existing is not None and str(existing["session_id"]) != str(session_id):
+                connection.execute(
+                    "DELETE FROM artifact_runs WHERE alias = ?",
+                    (alias,),
+                )
 
     def get_alias(self, alias: str) -> Optional[ThreadAlias]:
         with self._connect() as connection:
@@ -164,6 +180,10 @@ class BridgeStore:
             if cursor.rowcount > 0:
                 connection.execute(
                     "DELETE FROM contexts WHERE alias = ?",
+                    (alias,),
+                )
+                connection.execute(
+                    "DELETE FROM artifact_runs WHERE alias = ?",
                     (alias,),
                 )
         return cursor.rowcount > 0
@@ -316,6 +336,34 @@ class BridgeStore:
                 ),
             )
         return int(cursor.lastrowid)
+
+    def record_artifact_run(self, alias: str, run_id: str, session_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO artifact_runs (
+                    alias,
+                    run_id,
+                    session_id,
+                    updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(alias) DO UPDATE SET
+                    run_id=excluded.run_id,
+                    session_id=excluded.session_id,
+                    updated_at=excluded.updated_at
+                """,
+                (alias, run_id, session_id, self._now()),
+            )
+
+    def get_latest_artifact_run(self, alias: str) -> Optional[str]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT run_id FROM artifact_runs WHERE alias = ?",
+                (alias,),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["run_id"])
 
     def list_artifacts(self, alias: Optional[str] = None) -> List[Dict[str, object]]:
         with self._connect() as connection:
