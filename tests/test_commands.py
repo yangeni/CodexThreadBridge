@@ -64,10 +64,16 @@ def test_group_non_slash_text_is_plain_text() -> None:
     assert parsed.args == ("what is this?",)
 
 
-def test_group_non_bot_mention_stays_plain_text() -> None:
+def test_group_chatter_is_ignored() -> None:
+    parsed = parse_command("hello everyone", ConversationType.GROUP)
+    assert parsed.kind == CommandKind.GROUP_IGNORED
+    assert parsed.args == ()
+
+
+def test_group_non_bot_mention_is_ignored() -> None:
     parsed = parse_command("@Alice /qa status", ConversationType.GROUP)
-    assert parsed.kind == CommandKind.PLAIN_TEXT
-    assert parsed.args == ("@Alice /qa status",)
+    assert parsed.kind == CommandKind.GROUP_IGNORED
+    assert parsed.args == ()
 
 
 def test_bind_maps_to_compatibility_command() -> None:

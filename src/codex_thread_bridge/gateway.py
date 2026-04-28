@@ -76,6 +76,24 @@ class Gateway:
         if parsed.kind == CommandKind.STATUS:
             return self._handle_status(msg, parsed.args)
 
+        if parsed.kind == CommandKind.GROUP_APPROVE:
+            return self._handle_group_approve(msg, parsed.args)
+
+        if parsed.kind == CommandKind.GROUP_LIST:
+            return self._handle_group_list(msg)
+
+        if parsed.kind == CommandKind.GROUP_STATUS:
+            return self._handle_group_status(msg, parsed.args[0])
+
+        if parsed.kind == CommandKind.GROUP_RESET:
+            return self._handle_group_reset(msg, parsed.args[0])
+
+        if parsed.kind == CommandKind.GROUP_DISABLE:
+            return self._handle_group_disable(msg, parsed.args[0])
+
+        if parsed.kind == CommandKind.GROUP_PENDING:
+            return self._handle_group_pending(msg)
+
         if parsed.kind == CommandKind.PLAIN_TEXT:
             return self._dispatch_to_active_alias(msg, parsed.args[0])
 
@@ -126,10 +144,202 @@ class Gateway:
         return OutgoingMessage(msg.conversation_id, result.text)
 
     def _handle_group(self, msg: IncomingMessage) -> OutgoingMessage:
+        parsed = parse_command(msg.text, msg.conversation_type)
+        if parsed.kind == CommandKind.GROUP_IGNORED:
+            return OutgoingMessage(msg.conversation_id, "")
+        group = self.store.get_group_by_id(msg.conversation_id)
+        if group is None:
+            self.store.record_pending_group(msg.conversation_id, msg.conversation_id, "system")
+            return OutgoingMessage(
+                msg.conversation_id,
+                "This group is not enabled. Ask the owner to approve it in private chat.",
+            )
+        if group.get("status") != "active" or not group.get("qa_session_id"):
+            return OutgoingMessage(
+                msg.conversation_id,
+                "This group is not enabled. Ask the owner to approve it in private chat.",
+            )
+
+        group_alias = str(group["group_alias"])
+        if parsed.kind == CommandKind.GROUP_FORBIDDEN_COMMAND:
+            return OutgoingMessage(
+                msg.conversation_id,
+                "Group chat cannot dispatch work aliases.",
+            )
+        if parsed.kind == CommandKind.GROUP_QA_STATUS:
+            return OutgoingMessage(
+                msg.conversation_id,
+                "QA enabled: %s" % group_alias,
+            )
+
+        qa_session_id = str(group["qa_session_id"])
+        status = self.controller.status(qa_session_id)
+        if (
+            status.get("locked")
+            or status.get("dirty")
+            or status.get("reconcile_required")
+        ):
+            return OutgoingMessage(
+                msg.conversation_id,
+                "%s is not ready. Ask the owner to reconcile the QA session."
+                % group_alias,
+            )
+
+        text = self._strip_group_leading_mention(msg.text)
+        result = self.controller.start_or_send(
+            session_id=qa_session_id,
+            cwd=str(self.config.group_qa_cwd),
+            message=text,
+            owner="ctb-group-qa:%s" % group_alias,
+            policy=ExecutionPolicy.group_qa(),
+            idempotency_key="%s:%s" % (msg.raw_ref, group_alias),
+            expected_session_head=status.get("session_head"),
+        )
+        if result.approval_summary:
+            return OutgoingMessage(msg.conversation_id, result.approval_summary)
+        return OutgoingMessage(msg.conversation_id, result.text)
+
+    def _handle_group_approve(
+        self, msg: IncomingMessage, args: tuple[str, ...]
+    ) -> OutgoingMessage:
+        group_ref = args[0]
+        existing = self._find_group(group_ref)
+        group_id = group_ref
+        if existing is not None:
+            group_id = str(existing["group_id"])
+        if len(args) > 1:
+            group_alias = args[1]
+        elif existing is not None:
+            group_alias = str(existing["group_alias"])
+        else:
+            group_alias = group_ref
+
+        alias_owner = self.store.get_group_by_alias(group_alias)
+        if alias_owner is not None and str(alias_owner["group_id"]) != group_id:
+            return OutgoingMessage(
+                msg.conversation_id,
+                "Group alias already exists: %s" % group_alias,
+            )
+
+        self.store.record_pending_group(group_id, group_alias, msg.sender_id)
+        result = self.controller.start_or_send(
+            session_id=None,
+            cwd=str(self.config.group_qa_cwd),
+            message=self._group_qa_seed_text(group_alias),
+            owner="ctb-group-qa:%s" % group_alias,
+            policy=ExecutionPolicy.group_qa(),
+            idempotency_key="group-approve:%s" % group_alias,
+            expected_session_head=None,
+        )
+        self.store.activate_group(group_alias, result.session_id)
         return OutgoingMessage(
             msg.conversation_id,
-            "Group handling is added in a later task.",
+            "Approved group QA for %s." % group_alias,
         )
+
+    def _handle_group_list(self, msg: IncomingMessage) -> OutgoingMessage:
+        groups = self.store.list_groups()
+        if not groups:
+            return OutgoingMessage(msg.conversation_id, "No groups.")
+        lines = []
+        for group in groups:
+            lines.append(
+                "%s (%s): status=%s qa_session_id=%s"
+                % (
+                    group["group_alias"],
+                    group["group_id"],
+                    group["status"],
+                    group["qa_session_id"],
+                )
+            )
+        return OutgoingMessage(msg.conversation_id, "\n".join(lines))
+
+    def _handle_group_status(self, msg: IncomingMessage, group_ref: str) -> OutgoingMessage:
+        group = self._find_group(group_ref)
+        if group is None:
+            return OutgoingMessage(
+                msg.conversation_id,
+                "Unknown group: %s" % group_ref,
+            )
+        return OutgoingMessage(
+            msg.conversation_id,
+            "%s (%s): status=%s qa_session_id=%s"
+            % (
+                group["group_alias"],
+                group["group_id"],
+                group["status"],
+                group["qa_session_id"],
+            ),
+        )
+
+    def _handle_group_reset(self, msg: IncomingMessage, group_ref: str) -> OutgoingMessage:
+        group = self._find_group(group_ref)
+        if group is None:
+            return OutgoingMessage(
+                msg.conversation_id,
+                "Unknown group: %s" % group_ref,
+            )
+        self.store.record_pending_group(
+            str(group["group_id"]),
+            str(group["group_alias"]),
+            msg.sender_id,
+        )
+        return OutgoingMessage(
+            msg.conversation_id,
+            "Reset group %s to pending." % group["group_alias"],
+        )
+
+    def _handle_group_disable(self, msg: IncomingMessage, group_ref: str) -> OutgoingMessage:
+        group = self._find_group(group_ref)
+        if group is None:
+            return OutgoingMessage(
+                msg.conversation_id,
+                "Unknown group: %s" % group_ref,
+            )
+        self.store.disable_group(str(group["group_alias"]))
+        return OutgoingMessage(
+            msg.conversation_id,
+            "Disabled group %s." % group["group_alias"],
+        )
+
+    def _handle_group_pending(self, msg: IncomingMessage) -> OutgoingMessage:
+        pending_groups = [
+            group
+            for group in self.store.list_groups()
+            if str(group.get("status")) == "pending"
+        ]
+        if not pending_groups:
+            return OutgoingMessage(msg.conversation_id, "No pending groups.")
+        lines = []
+        for group in pending_groups:
+            lines.append("%s (%s)" % (group["group_alias"], group["group_id"]))
+        return OutgoingMessage(msg.conversation_id, "\n".join(lines))
+
+    def _find_group(self, group_ref: str) -> Optional[dict]:
+        group = self.store.get_group_by_alias(group_ref)
+        if group is not None:
+            return group
+        return self.store.get_group_by_id(group_ref)
+
+    def _group_qa_seed_text(self, group_alias: str) -> str:
+        return (
+            "You are the isolated QA session for WeChat group '%s'. "
+            "Answer questions about the current project in read-only mode only."
+            % group_alias
+        )
+
+    def _strip_group_leading_mention(self, text: str) -> str:
+        stripped = text.lstrip()
+        if not stripped.startswith("@Bot"):
+            return stripped
+        parts = stripped.split(None, 1)
+        if not parts:
+            return stripped
+        if parts[0] != "@Bot":
+            return stripped
+        if len(parts) == 1:
+            return ""
+        return parts[1].lstrip()
 
     def _handle_status(self, msg: IncomingMessage, args: tuple[str, ...]) -> OutgoingMessage:
         if args:

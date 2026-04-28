@@ -27,6 +27,7 @@ class CommandKind(str, Enum):
     GROUP_DISABLE = "GROUP_DISABLE"
     GROUP_QA_STATUS = "GROUP_QA_STATUS"
     GROUP_FORBIDDEN_COMMAND = "GROUP_FORBIDDEN_COMMAND"
+    GROUP_IGNORED = "GROUP_IGNORED"
     PLAIN_TEXT = "PLAIN_TEXT"
 
 
@@ -212,7 +213,7 @@ def _parse_group(text: str) -> ParsedCommand:
     if detection_text == text:
         if text.startswith("/"):
             return ParsedCommand(CommandKind.GROUP_FORBIDDEN_COMMAND, ())
-        return _plain_text(text)
+        return ParsedCommand(CommandKind.GROUP_IGNORED, ())
     if not detection_text.startswith("/"):
         return _plain_text(detection_text)
 
