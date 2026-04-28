@@ -7,6 +7,7 @@ data/attachments/**
 
 # Local planning/mockup scratch
 .superpowers/
+.worktrees/
 
 # Python
 __pycache__/
