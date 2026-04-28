@@ -1,0 +1,28 @@
+# Runtime state
+data/bridge.sqlite3
+data/*.sqlite3
+data/*.db
+data/attachments/**
+!data/attachments/.gitignore
+
+# Local planning/mockup scratch
+.superpowers/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Secrets and local config
+.env
+.env.*
+*.log
