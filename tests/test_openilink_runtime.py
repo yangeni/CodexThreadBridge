@@ -76,6 +76,24 @@ def _batch(*msgs: dict) -> dict:
     }
 
 
+def _processed_key(conversation_id: str, message_id: str) -> str:
+    return runtime_module._processed_message_key(
+        runtime_module._message_ref(conversation_id, message_id)
+    )
+
+
+def _outbox_key(conversation_id: str, message_id: str) -> str:
+    return runtime_module._outbox_message_key(
+        runtime_module._message_ref(conversation_id, message_id)
+    )
+
+
+def _delivery_key(conversation_id: str, message_id: str) -> str:
+    return runtime_module._delivery_message_key(
+        runtime_module._message_ref(conversation_id, message_id)
+    )
+
+
 def test_process_one_batch_handles_private_message_sends_reply_and_advances_cursor(tmp_path) -> None:
     store = BridgeStore(tmp_path / "bridge.sqlite3")
     store.initialize()
@@ -97,7 +115,7 @@ def test_process_one_batch_handles_private_message_sends_reply_and_advances_curs
     assert client.contexts == [("owner-1", "owner-1", "ctx-owner-1")]
     assert client.sent == [("owner-1", "help text")]
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
-    assert store.get_runtime_state("ilink.delivery.owner-1.12345") == "sent"
+    assert store.get_runtime_state(_delivery_key("owner-1", "12345")) == "sent"
 
 
 def test_empty_gateway_reply_does_not_send_text_but_advances_cursor(tmp_path) -> None:
@@ -118,7 +136,7 @@ def test_empty_gateway_reply_does_not_send_text_but_advances_cursor(tmp_path) ->
     assert result.replies_sent == 0
     assert client.sent == []
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
-    assert store.get_runtime_state("ilink.delivery.12345") is None
+    assert store.get_runtime_state(_delivery_key("owner-1", "12345")) is None
 
 
 def test_send_exception_marks_delivery_unknown_without_replay(tmp_path) -> None:
@@ -144,8 +162,8 @@ def test_send_exception_marks_delivery_unknown_without_replay(tmp_path) -> None:
     assert result.replies_sent == 0
     assert result.cursor == "cursor-2"
     assert store.get_runtime_state("ilink.cursor") is None
-    assert store.get_runtime_state("ilink.delivery.owner-1.12345") == "unknown"
-    assert store.get_runtime_state("ilink.processed.owner-1.12345") == "1"
+    assert store.get_runtime_state(_delivery_key("owner-1", "12345")) == "unknown"
+    assert store.get_runtime_state(_processed_key("owner-1", "12345")) == "1"
     events = store.list_events("delivery_unknown")
     assert len(events) == 1
     payload = json.loads(str(events[0]["payload_json"]))
@@ -184,7 +202,7 @@ def test_terminal_send_error_records_failed_delivery_with_message_id(tmp_path) -
         runtime.process_one_batch()
 
     assert store.get_runtime_state("ilink.cursor") is None
-    assert store.get_runtime_state("ilink.delivery.owner-1.12345") == "failed"
+    assert store.get_runtime_state(_delivery_key("owner-1", "12345")) == "failed"
     events = store.list_events("delivery_failed")
     assert len(events) == 1
     payload = json.loads(str(events[0]["payload_json"]))
@@ -229,9 +247,9 @@ def test_send_exception_does_not_rerun_gateway_or_auto_replay_outbox(tmp_path) -
     first_result = runtime.process_one_batch()
 
     assert first_result.replies_sent == 0
-    assert store.get_runtime_state("ilink.outbox.owner-1.12345") == "reply-1"
-    assert store.get_runtime_state("ilink.delivery.owner-1.12345") == "unknown"
-    assert store.get_runtime_state("ilink.processed.owner-1.12345") == "1"
+    assert store.get_runtime_state(_outbox_key("owner-1", "12345")) == "reply-1"
+    assert store.get_runtime_state(_delivery_key("owner-1", "12345")) == "unknown"
+    assert store.get_runtime_state(_processed_key("owner-1", "12345")) == "1"
 
     second_result = runtime.process_one_batch()
 
@@ -239,7 +257,7 @@ def test_send_exception_does_not_rerun_gateway_or_auto_replay_outbox(tmp_path) -
     assert gateway.calls == 1
     assert client.sent == []
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
-    assert store.get_runtime_state("ilink.delivery.owner-1.12345") == "unknown"
+    assert store.get_runtime_state(_delivery_key("owner-1", "12345")) == "unknown"
 
 
 def test_unknown_inflight_delivery_marks_processed_without_replay(tmp_path) -> None:
@@ -254,10 +272,10 @@ def test_unknown_inflight_delivery_marks_processed_without_replay(tmp_path) -> N
     store = BridgeStore(tmp_path / "bridge.sqlite3")
     store.initialize()
     store.set_runtime_state(
-        "ilink.outbox.owner-1.12345",
+        _outbox_key("owner-1", "12345"),
         "possibly delivered reply",
     )
-    store.set_runtime_state("ilink.delivery.owner-1.12345", "sending")
+    store.set_runtime_state(_delivery_key("owner-1", "12345"), "sending")
     client = FakeIlinkClient(_batch(_private_message("replayed")))
     gateway = FailingGateway()
     runtime = OpeniLinkRuntime(
@@ -274,8 +292,8 @@ def test_unknown_inflight_delivery_marks_processed_without_replay(tmp_path) -> N
     assert gateway.called is False
     assert client.sent == []
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
-    assert store.get_runtime_state("ilink.processed.owner-1.12345") == "1"
-    assert store.get_runtime_state("ilink.delivery.owner-1.12345") == "unknown"
+    assert store.get_runtime_state(_processed_key("owner-1", "12345")) == "1"
+    assert store.get_runtime_state(_delivery_key("owner-1", "12345")) == "unknown"
     events = store.list_events("delivery_unknown")
     assert len(events) == 1
     payload = json.loads(str(events[0]["payload_json"]))
@@ -329,9 +347,9 @@ def test_partial_batch_send_exception_marks_unknown_and_skips_duplicate_on_repla
 
     assert first_result.replies_sent == 1
     assert store.get_runtime_state("ilink.cursor") == "cursor-1"
-    assert store.get_runtime_state("ilink.processed.owner-1.msg-1") == "1"
-    assert store.get_runtime_state("ilink.processed.owner-1.msg-2") == "1"
-    assert store.get_runtime_state("ilink.delivery.owner-1.msg-2") == "unknown"
+    assert store.get_runtime_state(_processed_key("owner-1", "msg-1")) == "1"
+    assert store.get_runtime_state(_processed_key("owner-1", "msg-2")) == "1"
+    assert store.get_runtime_state(_delivery_key("owner-1", "msg-2")) == "unknown"
 
     second_result = runtime.process_one_batch()
 
@@ -339,7 +357,7 @@ def test_partial_batch_send_exception_marks_unknown_and_skips_duplicate_on_repla
     assert gateway.seen_texts == ["first", "second"]
     assert client.sent == [("owner-1", "first reply")]
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
-    assert store.get_runtime_state("ilink.processed.owner-1.msg-2") == "1"
+    assert store.get_runtime_state(_processed_key("owner-1", "msg-2")) == "1"
 
 
 def test_same_message_id_in_different_conversations_uses_distinct_runtime_state(
@@ -382,8 +400,50 @@ def test_same_message_id_in_different_conversations_uses_distinct_runtime_state(
         ("owner-1", "first reply"),
         ("owner-2", "second reply"),
     ]
-    assert store.get_runtime_state("ilink.processed.owner-1.shared") == "1"
-    assert store.get_runtime_state("ilink.processed.owner-2.shared") == "1"
+    assert store.get_runtime_state(_processed_key("owner-1", "shared")) == "1"
+    assert store.get_runtime_state(_processed_key("owner-2", "shared")) == "1"
+
+
+def test_runtime_state_identity_does_not_collide_when_ids_contain_delimiter(
+    tmp_path,
+) -> None:
+    first = _private_message(
+        "first",
+        message_id="c",
+        from_user_id="a.b",
+        context_token="ctx-a-b",
+    )
+    second = _private_message(
+        "second",
+        message_id="b.c",
+        from_user_id="a",
+        context_token="ctx-a",
+    )
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    store.initialize()
+    client = FakeIlinkClient(_batch(first, second))
+    gateway = FakeGateway(
+        [
+            OutgoingMessage("a.b", "first reply"),
+            OutgoingMessage("a", "second reply"),
+        ],
+        [],
+    )
+    runtime = OpeniLinkRuntime(
+        client=client,
+        gateway=gateway,
+        store=store,
+        owner_user_ids={"a.b", "a"},
+    )
+
+    result = runtime.process_one_batch()
+
+    assert result.replies_sent == 2
+    assert gateway.seen_texts == ["first", "second"]
+    assert client.sent == [
+        ("a.b", "first reply"),
+        ("a", "second reply"),
+    ]
 
 
 def test_group_message_is_ignored_by_v03_runtime_without_calling_gateway(tmp_path) -> None:
@@ -452,7 +512,7 @@ def test_private_group_management_command_is_rejected_before_gateway(tmp_path) -
         ("owner-1", "Group QA runtime is not enabled in v0.3.")
     ]
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
-    assert store.get_runtime_state("ilink.processed.owner-1.12345") == "1"
+    assert store.get_runtime_state(_processed_key("owner-1", "12345")) == "1"
 
 
 def test_failed_group_management_rejection_marks_unknown_without_gateway_replay(tmp_path) -> None:
@@ -492,11 +552,11 @@ def test_failed_group_management_rejection_marks_unknown_without_gateway_replay(
     assert gateway.called is False
     assert store.get_runtime_state("ilink.cursor") is None
     assert (
-        store.get_runtime_state("ilink.outbox.owner-1.12345")
+        store.get_runtime_state(_outbox_key("owner-1", "12345"))
         == "Group QA runtime is not enabled in v0.3."
     )
-    assert store.get_runtime_state("ilink.processed.owner-1.12345") == "1"
-    assert store.get_runtime_state("ilink.delivery.owner-1.12345") == "unknown"
+    assert store.get_runtime_state(_processed_key("owner-1", "12345")) == "1"
+    assert store.get_runtime_state(_delivery_key("owner-1", "12345")) == "unknown"
 
     second_result = runtime.process_one_batch()
 
@@ -504,7 +564,7 @@ def test_failed_group_management_rejection_marks_unknown_without_gateway_replay(
     assert gateway.called is False
     assert client.sent == []
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
-    assert store.get_runtime_state("ilink.processed.owner-1.12345") == "1"
+    assert store.get_runtime_state(_processed_key("owner-1", "12345")) == "1"
 
 
 def test_malformed_message_records_event_and_later_valid_message_still_advances_cursor(tmp_path) -> None:

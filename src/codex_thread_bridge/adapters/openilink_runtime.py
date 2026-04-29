@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from dataclasses import dataclass
 from typing import Iterable, Optional, Sequence
@@ -262,7 +263,11 @@ def _is_terminal_runtime_error(exc: Exception) -> bool:
 
 
 def _message_ref(conversation_id: str, message_id: str) -> str:
-    return "%s.%s" % (conversation_id, message_id)
+    return json.dumps(
+        [conversation_id, message_id],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
 
 
 def _processed_message_key(message_ref: str) -> str:
