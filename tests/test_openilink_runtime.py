@@ -764,6 +764,7 @@ def test_runtime_smoke_add_use_and_dispatch_with_fake_controller(tmp_path) -> No
             policy: ExecutionPolicy,
             idempotency_key: str,
             expected_session_head: Optional[str],
+            intent: str = "direct_message",
         ) -> ControllerRunResult:
             self.starts.append(
                 {
@@ -774,6 +775,7 @@ def test_runtime_smoke_add_use_and_dispatch_with_fake_controller(tmp_path) -> No
                     "policy": policy,
                     "idempotency_key": idempotency_key,
                     "expected_session_head": expected_session_head,
+                    "intent": intent,
                 }
             )
             return ControllerRunResult(
@@ -784,6 +786,23 @@ def test_runtime_smoke_add_use_and_dispatch_with_fake_controller(tmp_path) -> No
                 text="done",
                 approval_summary=None,
             )
+
+        def recover_session(
+            self,
+            *,
+            session_id: str,
+            owner: str,
+            human_authorized: bool,
+        ) -> dict:
+            return {
+                "session_id": session_id,
+                "owner": owner,
+                "human_authorized": human_authorized,
+                "released": True,
+                "acked_runs": [],
+                "cancelled_runs": [],
+                "closed_runs": [],
+            }
 
     controller = RuntimeSmokeController()
     gateway = Gateway(config, store, controller)

@@ -49,7 +49,7 @@ def test_build_start_payload_uses_alias_policy_and_controller_defaults() -> None
     assert payload["cwd"] == "/tmp/project"
     assert payload["message"] == "hello"
     assert payload["owner"] == "ctb-private:owner-1"
-    assert payload["intent"] == "plan_review"
+    assert payload["intent"] == "direct_message"
     assert payload["transport"] == "app_server"
     assert payload["plan_capability"] == "protocol"
     assert payload["sandbox"] == "workspace-write"
@@ -64,6 +64,21 @@ def test_build_start_payload_uses_alias_policy_and_controller_defaults() -> None
     assert payload["acceptance_criteria"] == []
     assert payload["parent_run_id"] is None
     assert payload["lease_seconds"] == 900
+
+
+def test_build_start_payload_accepts_plan_review_intent() -> None:
+    payload = build_start_payload(
+        session_id="019-code",
+        cwd="/tmp/project",
+        message="hello",
+        owner="ctb-private:owner-1",
+        policy=ExecutionPolicy.work_default("/tmp/project"),
+        idempotency_key="m-1:code",
+        expected_session_head=None,
+        intent="plan_review",
+    )
+
+    assert payload["intent"] == "plan_review"
 
 
 def test_mcp_controller_client_status_normalizes_controller_session() -> None:
@@ -221,6 +236,7 @@ def test_start_or_send_runs_controller_lifecycle_and_returns_text() -> None:
     ]
     start_args = transport.requests[2][1]["arguments"]
     assert start_args["lease_seconds"] == 456
+    assert start_args["intent"] == "direct_message"
     assert start_args["attachments"] == []
     assert transport.requests[3][1]["arguments"] == {
         "run_ids": ["run-1"],
@@ -240,6 +256,160 @@ def test_start_or_send_runs_controller_lifecycle_and_returns_text() -> None:
     assert result.status == "completed"
     assert result.text == "done text"
     assert result.approval_summary is None
+
+
+def test_start_or_send_can_use_plan_review_intent() -> None:
+    transport = FakeTransport(
+        [
+            {"capabilities": {"tools": {}}},
+            tool_result(
+                {
+                    "run_id": "run-1",
+                    "session_id": "019-code",
+                    "session_head": "head-start",
+                    "lock_token": "lock-1",
+                    "last_event_seq": 7,
+                    "run": {"run_id": "run-1", "session_id": "019-code"},
+                    "session": {"session_id": "019-code", "status": "active"},
+                }
+            ),
+            tool_result({"status": "ready", "runs": [{"run_id": "run-1"}]}),
+            tool_result(
+                {
+                    "run": {
+                        "run_id": "run-1",
+                        "session_id": "019-code",
+                        "status": "completed",
+                        "actual_session_head": "head-2",
+                    },
+                    "result_text": "done",
+                }
+            ),
+            tool_result({"run": {"run_id": "run-1", "status": "completed"}}),
+            tool_result({"run": {"run_id": "run-1", "closed_at": 1.0}}),
+            tool_result({"session": {"session_id": "019-code", "status": "released"}}),
+        ]
+    )
+    client = McpControllerClient(["fake-mcp"], transport_factory=lambda: transport)
+
+    client.start_or_send(
+        session_id="019-code",
+        cwd="/tmp/project",
+        message="hello",
+        owner="ctb-private:owner-1",
+        policy=ExecutionPolicy.work_default("/tmp/project"),
+        idempotency_key="m-1:code",
+        expected_session_head=None,
+        intent="plan_review",
+    )
+
+    assert transport.requests[2][1]["arguments"]["intent"] == "plan_review"
+
+
+def test_recover_session_force_recovers_cleans_terminal_runs_and_releases() -> None:
+    transport = FakeTransport(
+        [
+            {"capabilities": {"tools": {}}},
+            tool_result(
+                {
+                    "session": {"session_id": "019-code", "status": "locked"},
+                    "lock_token": "lock-recover",
+                }
+            ),
+            tool_result(
+                {
+                    "runs": [
+                        {
+                            "run_id": "run-old",
+                            "session_id": "019-code",
+                            "status": "failed",
+                            "delivery_ack_at": None,
+                            "closed_at": None,
+                        }
+                    ]
+                }
+            ),
+            tool_result({"run": {"run_id": "run-old", "status": "failed"}}),
+            tool_result({"run": {"run_id": "run-old", "closed_at": 1.0}}),
+            tool_result({"session": {"session_id": "019-code", "status": "released"}}),
+        ]
+    )
+    client = McpControllerClient(["fake-mcp"], transport_factory=lambda: transport)
+
+    result = client.recover_session(
+        session_id="019-code",
+        owner="ctb-private:owner-1",
+        human_authorized=True,
+    )
+
+    tool_calls = [
+        params["name"]
+        for method, params in transport.requests
+        if method == "tools/call"
+    ]
+    assert tool_calls == [
+        "cross_thread_force_recover",
+        "cross_thread_list_runs",
+        "cross_thread_delivery_ack",
+        "cross_thread_close",
+        "cross_thread_release",
+    ]
+    assert result["released"] is True
+    assert result["acked_runs"] == ["run-old"]
+    assert result["closed_runs"] == ["run-old"]
+
+
+def test_recover_session_cancels_in_progress_run_before_release() -> None:
+    transport = FakeTransport(
+        [
+            {"capabilities": {"tools": {}}},
+            tool_result(
+                {
+                    "session": {"session_id": "019-code", "status": "locked"},
+                    "lock_token": "lock-recover",
+                }
+            ),
+            tool_result(
+                {
+                    "runs": [
+                        {
+                            "run_id": "run-live",
+                            "session_id": "019-code",
+                            "status": "in_progress",
+                            "delivery_ack_at": None,
+                            "closed_at": None,
+                        }
+                    ]
+                }
+            ),
+            tool_result({"run": {"run_id": "run-live", "status": "cancelled"}}),
+            tool_result({"run": {"run_id": "run-live", "status": "cancelled"}}),
+            tool_result({"run": {"run_id": "run-live", "closed_at": 1.0}}),
+            tool_result({"session": {"session_id": "019-code", "status": "released"}}),
+        ]
+    )
+    client = McpControllerClient(["fake-mcp"], transport_factory=lambda: transport)
+
+    result = client.recover_session(
+        session_id="019-code",
+        owner="ctb-private:owner-1",
+        human_authorized=True,
+    )
+
+    tool_calls = [
+        params["name"]
+        for method, params in transport.requests
+        if method == "tools/call"
+    ]
+    assert tool_calls == [
+        "cross_thread_force_recover",
+        "cross_thread_list_runs",
+        "cross_thread_cancel",
+        "cross_thread_delivery_ack",
+        "cross_thread_close",
+        "cross_thread_release",
+    ]
+    assert result["cancelled_runs"] == ["run-live"]
 
 
 def test_start_or_send_releases_after_close_failure_when_ack_succeeded() -> None:

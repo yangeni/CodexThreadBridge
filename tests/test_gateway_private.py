@@ -21,6 +21,7 @@ from codex_thread_bridge.stores import BridgeStore
 @dataclass
 class FakeControllerClient:
     starts: list[dict[str, object]] = field(default_factory=list)
+    recovers: list[dict[str, object]] = field(default_factory=list)
     status_by_session: dict[str, dict] = field(default_factory=dict)
     created_session_count: int = 0
 
@@ -46,6 +47,7 @@ class FakeControllerClient:
         policy: ExecutionPolicy,
         idempotency_key: str,
         expected_session_head: Optional[str],
+        intent: str = "direct_message",
     ) -> ControllerRunResult:
         kwargs = {
             "session_id": session_id,
@@ -55,6 +57,7 @@ class FakeControllerClient:
             "policy": policy,
             "idempotency_key": idempotency_key,
             "expected_session_head": expected_session_head,
+            "intent": intent,
         }
         self.starts.append(kwargs)
         if session_id is None:
@@ -70,6 +73,25 @@ class FakeControllerClient:
             text="done",
             approval_summary=None,
         )
+
+    def recover_session(
+        self,
+        *,
+        session_id: str,
+        owner: str,
+        human_authorized: bool,
+    ) -> dict:
+        result = {
+            "session_id": session_id,
+            "owner": owner,
+            "human_authorized": human_authorized,
+            "released": True,
+            "acked_runs": ["run-old"],
+            "cancelled_runs": [],
+            "closed_runs": ["run-old"],
+        }
+        self.recovers.append(result)
+        return result
 
 
 def test_controller_result_model() -> None:
@@ -209,6 +231,7 @@ def test_private_add_use_and_plain_dispatch(tmp_path: Path) -> None:
     assert controller.starts[0]["owner"] == "ctb-private:owner-1"
     assert controller.starts[0]["idempotency_key"] == "m-private:code"
     assert controller.starts[0]["expected_session_head"] is None
+    assert controller.starts[0]["intent"] == "direct_message"
     assert controller.starts[0]["policy"].writable_roots == ("/tmp/codex-target/code",)
     assert controller.starts[0]["policy"].approval_policy == "on-request"
     assert alias.default_cwd == "/tmp/codex-target/code"
@@ -237,6 +260,54 @@ def test_private_dispatch_does_not_fence_on_released_status_head_after_app_edits
 
     assert reply.text == "done"
     assert controller.starts[0]["expected_session_head"] is None
+
+
+def test_private_plan_command_uses_plan_review_intent(tmp_path: Path) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    store.upsert_alias(
+        "code",
+        "019-code",
+        "019-code",
+        "/tmp/codex-target/code",
+        ExecutionPolicy.work_default("/tmp/codex-target/code"),
+        "owner-1",
+    )
+    store.set_active_alias(private_msg("/use code").context_key, "code", "owner-1")
+
+    reply = gateway.handle(private_msg("/plan 请评估这个操作", raw_ref="m-plan"))
+
+    assert reply.text == "done"
+    assert controller.starts[0]["message"] == "请评估这个操作"
+    assert controller.starts[0]["intent"] == "plan_review"
+    assert controller.starts[0]["idempotency_key"] == "m-plan:code"
+
+
+def test_private_recover_alias_recovers_without_model_turn(tmp_path: Path) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    store.upsert_alias(
+        "code",
+        "019-code",
+        "019-code",
+        "/tmp/codex-target/code",
+        ExecutionPolicy.work_default("/tmp/codex-target/code"),
+        "owner-1",
+    )
+
+    reply = gateway.handle(private_msg("/recover code"))
+
+    assert "Recovered code" in reply.text
+    assert controller.starts == []
+    assert controller.recovers == [
+        {
+            "session_id": "019-code",
+            "owner": "ctb-private:owner-1",
+            "human_authorized": True,
+            "released": True,
+            "acked_runs": ["run-old"],
+            "cancelled_runs": [],
+            "closed_runs": ["run-old"],
+        }
+    ]
 
 
 def test_private_plain_message_without_active_alias_is_rejected(tmp_path: Path) -> None:

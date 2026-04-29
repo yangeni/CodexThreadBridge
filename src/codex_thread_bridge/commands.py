@@ -14,6 +14,8 @@ class CommandKind(str, Enum):
     REMOVE_ALIAS = "REMOVE_ALIAS"
     STATUS = "STATUS"
     REFRESH = "REFRESH"
+    RECOVER = "RECOVER"
+    PLAN_REVIEW = "PLAN_REVIEW"
     SEND_ONCE = "SEND_ONCE"
     ARTIFACTS = "ARTIFACTS"
     SEND_FILE = "SEND_FILE"
@@ -47,6 +49,8 @@ _PRIVATE_WORK_COMMANDS = frozenset(
         "remove",
         "status",
         "refresh",
+        "recover",
+        "plan",
         "send",
         "artifacts",
         "sendfile",
@@ -149,6 +153,16 @@ def _parse_private(text: str) -> ParsedCommand:
         if len(args) > 1:
             return _help_command()
         return ParsedCommand(CommandKind.REFRESH, tuple(args))
+
+    if command == "recover":
+        if len(args) != 1:
+            return _help_command()
+        return ParsedCommand(CommandKind.RECOVER, (args[0],))
+
+    if command == "plan":
+        if not args:
+            return _help_command()
+        return ParsedCommand(CommandKind.PLAN_REVIEW, (" ".join(args),))
 
     if command == "send":
         if len(args) < 2:

@@ -89,9 +89,19 @@ class Gateway:
         if parsed.kind == CommandKind.REFRESH:
             return self._handle_refresh(msg, parsed.args)
 
+        if parsed.kind == CommandKind.RECOVER:
+            return self._handle_recover(msg, parsed.args[0])
+
         if parsed.kind == CommandKind.SEND_ONCE:
             alias_name, text = parsed.args
             return self._dispatch_to_alias(msg, alias_name, text, active_context=False)
+
+        if parsed.kind == CommandKind.PLAN_REVIEW:
+            return self._dispatch_to_active_alias(
+                msg,
+                parsed.args[0],
+                intent="plan_review",
+            )
 
         if parsed.kind == CommandKind.ARTIFACTS:
             return self._handle_artifacts(msg, parsed.args)
@@ -129,7 +139,10 @@ class Gateway:
         )
 
     def _dispatch_to_active_alias(
-        self, msg: IncomingMessage, text: str
+        self,
+        msg: IncomingMessage,
+        text: str,
+        intent: str = "direct_message",
     ) -> OutgoingMessage:
         active_alias = self.store.get_active_alias(msg.context_key)
         if active_alias is None:
@@ -137,7 +150,13 @@ class Gateway:
                 msg.conversation_id,
                 "No active thread. Use /use <alias> first.",
             )
-        return self._dispatch_to_alias(msg, active_alias, text, active_context=True)
+        return self._dispatch_to_alias(
+            msg,
+            active_alias,
+            text,
+            active_context=True,
+            intent=intent,
+        )
 
     def _dispatch_to_alias(
         self,
@@ -145,6 +164,7 @@ class Gateway:
         alias_name: str,
         text: str,
         active_context: bool,
+        intent: str = "direct_message",
     ) -> OutgoingMessage:
         alias = self.store.get_alias(alias_name)
         if alias is None:
@@ -178,6 +198,7 @@ class Gateway:
             policy=alias.policy,
             idempotency_key="%s:%s" % (msg.raw_ref, alias.alias),
             expected_session_head=None,
+            intent=intent,
         )
         self.store.record_artifact_run(
             alias=alias.alias,
@@ -198,6 +219,30 @@ class Gateway:
         if result.approval_summary:
             return OutgoingMessage(msg.conversation_id, result.approval_summary)
         return OutgoingMessage(msg.conversation_id, result.text)
+
+    def _handle_recover(self, msg: IncomingMessage, alias_name: str) -> OutgoingMessage:
+        alias = self.store.get_alias(alias_name)
+        if alias is None:
+            return OutgoingMessage(
+                msg.conversation_id,
+                "Unknown alias: %s" % alias_name,
+            )
+        result = self.controller.recover_session(
+            session_id=alias.session_id,
+            owner="ctb-private:%s" % msg.sender_id,
+            human_authorized=True,
+        )
+        return OutgoingMessage(
+            msg.conversation_id,
+            "Recovered %s: released=%s acked=%s cancelled=%s closed=%s"
+            % (
+                alias.alias,
+                bool(result.get("released")),
+                len(result.get("acked_runs") or []),
+                len(result.get("cancelled_runs") or []),
+                len(result.get("closed_runs") or []),
+            ),
+        )
 
     def _handle_add_alias(
         self,
@@ -279,6 +324,7 @@ class Gateway:
             policy=ExecutionPolicy.group_qa(),
             idempotency_key="%s:%s" % (msg.raw_ref, group_alias),
             expected_session_head=None,
+            intent="direct_message",
         )
         if result.approval_summary:
             return OutgoingMessage(msg.conversation_id, result.approval_summary)
@@ -315,6 +361,7 @@ class Gateway:
             policy=ExecutionPolicy.group_qa(),
             idempotency_key="group-approve:%s" % group_alias,
             expected_session_head=None,
+            intent="direct_message",
         )
         self.store.activate_group(group_alias, result.session_id)
         return OutgoingMessage(
@@ -673,6 +720,8 @@ def _help_text() -> str:
             "/remove <alias>",
             "/status [alias]",
             "/refresh [alias]",
+            "/recover <alias>",
+            "/plan <message>",
             "/send <alias> <message>",
             "/artifacts [alias]",
             "/sendfile <artifact_id|all>",

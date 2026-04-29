@@ -53,7 +53,17 @@ class ControllerClient(Protocol):
         policy: ExecutionPolicy,
         idempotency_key: str,
         expected_session_head: Optional[str],
+        intent: str = "direct_message",
     ) -> ControllerRunResult:
+        ...
+
+    def recover_session(
+        self,
+        *,
+        session_id: str,
+        owner: str,
+        human_authorized: bool,
+    ) -> dict:
         ...
 
 
@@ -77,6 +87,7 @@ def build_start_payload(
     policy: ExecutionPolicy,
     idempotency_key: str,
     expected_session_head: Optional[str],
+    intent: str = "direct_message",
     lease_seconds: int = DEFAULT_LEASE_SECONDS,
 ) -> dict:
     return {
@@ -84,7 +95,7 @@ def build_start_payload(
         "cwd": cwd,
         "message": message,
         "owner": owner,
-        "intent": "plan_review",
+        "intent": intent,
         "transport": "app_server",
         "plan_capability": "protocol",
         "sandbox": policy.sandbox,
@@ -318,6 +329,7 @@ class McpControllerClient:
         policy: ExecutionPolicy,
         idempotency_key: str,
         expected_session_head: Optional[str],
+        intent: str = "direct_message",
     ) -> ControllerRunResult:
         transport = self._open_transport()
         run_id = None
@@ -334,6 +346,7 @@ class McpControllerClient:
                 policy=policy,
                 idempotency_key=idempotency_key,
                 expected_session_head=expected_session_head,
+                intent=intent,
                 lease_seconds=self.lease_seconds,
             )
             started = self._call_tool(transport, "cross_thread_start", payload)
@@ -422,6 +435,92 @@ class McpControllerClient:
                 text=run_result.text,
                 approval_summary=run_result.approval_summary,
             )
+        finally:
+            transport.close()
+
+    def recover_session(
+        self,
+        *,
+        session_id: str,
+        owner: str,
+        human_authorized: bool,
+    ) -> dict:
+        transport = self._open_transport()
+        lock_token = None
+        acked_runs: list[str] = []
+        cancelled_runs: list[str] = []
+        closed_runs: list[str] = []
+        try:
+            self._initialize(transport)
+            recovered = self._call_tool(
+                transport,
+                "cross_thread_force_recover",
+                {
+                    "session_id": session_id,
+                    "owner": owner,
+                    "transport": "app_server",
+                    "lease_seconds": self.lease_seconds,
+                    "human_authorized": bool(human_authorized),
+                },
+            )
+            lock_token = self._lock_token(recovered)
+            runs = self._call_tool(
+                transport,
+                "cross_thread_list_runs",
+                {
+                    "owner": None,
+                    "status": None,
+                    "session_id": session_id,
+                    "limit": 100,
+                },
+            ).get("runs")
+            if not isinstance(runs, list):
+                runs = []
+
+            for run in runs:
+                if not isinstance(run, dict):
+                    continue
+                run_id = self._first_str(run.get("run_id"))
+                if not run_id:
+                    continue
+                status = self._first_str(run.get("status"))
+                if status == "in_progress":
+                    self._call_tool(
+                        transport,
+                        "cross_thread_cancel",
+                        {"run_id": run_id, "reason": "manual recover"},
+                    )
+                    cancelled_runs.append(run_id)
+                if status in TERMINAL_RUN_STATUSES or status == "in_progress":
+                    if not run.get("delivery_ack_at") and not run.get("transferred_to"):
+                        self._call_tool(
+                            transport,
+                            "cross_thread_delivery_ack",
+                            {"run_id": run_id},
+                        )
+                        acked_runs.append(run_id)
+                    if not run.get("closed_at"):
+                        self._call_tool(
+                            transport,
+                            "cross_thread_close",
+                            {"run_id": run_id},
+                        )
+                        closed_runs.append(run_id)
+
+            self._call_tool(
+                transport,
+                "cross_thread_release",
+                {"session_id": session_id, "lock_token": lock_token},
+            )
+            return {
+                "session_id": session_id,
+                "owner": owner,
+                "human_authorized": bool(human_authorized),
+                "released": True,
+                "acked_runs": acked_runs,
+                "cancelled_runs": cancelled_runs,
+                "closed_runs": closed_runs,
+            }
         finally:
             transport.close()
 

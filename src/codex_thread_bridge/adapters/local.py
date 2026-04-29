@@ -75,6 +75,7 @@ class EchoController:
         policy: ExecutionPolicy,
         idempotency_key: str,
         expected_session_head: Optional[str],
+        intent: str = "direct_message",
     ) -> ControllerRunResult:
         result_session_id = session_id or "local-session"
         return ControllerRunResult(
@@ -85,6 +86,23 @@ class EchoController:
             text="LOCAL: %s" % message,
             approval_summary=None,
         )
+
+    def recover_session(
+        self,
+        *,
+        session_id: str,
+        owner: str,
+        human_authorized: bool,
+    ) -> dict:
+        return {
+            "session_id": session_id,
+            "owner": owner,
+            "human_authorized": human_authorized,
+            "released": True,
+            "acked_runs": [],
+            "cancelled_runs": [],
+            "closed_runs": [],
+        }
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
