@@ -345,7 +345,7 @@ class BridgeStore:
                 INSERT INTO events (event_type, payload_json, created_at)
                 VALUES (?, ?, ?)
                 """,
-                (event_type, json.dumps(payload, ensure_ascii=True), self._now()),
+                (event_type, self._serialize_event_payload(payload), self._now()),
             )
         return int(cursor.lastrowid)
 
@@ -483,6 +483,9 @@ class BridgeStore:
         if isinstance(context_key, str):
             return json.dumps(context_key)
         return json.dumps(list(context_key), ensure_ascii=True)
+
+    def _serialize_event_payload(self, payload: Dict[str, object]) -> str:
+        return json.dumps(payload, ensure_ascii=True, default=str)
 
     def _row_to_dict(self, row: sqlite3.Row) -> Dict[str, object]:
         return {key: row[key] for key in row.keys()}

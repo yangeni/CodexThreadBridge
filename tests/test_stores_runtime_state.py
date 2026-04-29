@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from codex_thread_bridge.stores import BridgeStore
 
 
@@ -31,3 +33,24 @@ def test_runtime_event_records_sanitized_payload(tmp_path) -> None:
             "payload_json": "{\"conversation_id\": \"owner-1\", \"reason\": \"timeout\"}",
         }
     ]
+
+
+def test_runtime_event_stringifies_non_json_native_payload_values(tmp_path) -> None:
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    store.initialize()
+
+    store.record_event(
+        "delivery_failed",
+        {
+            "attachment_path": tmp_path / "artifact.txt",
+            "failure": RuntimeError("connection dropped"),
+            "raw_response": b"not json",
+        },
+    )
+
+    event = store.list_events("delivery_failed")[0]
+    assert json.loads(str(event["payload_json"])) == {
+        "attachment_path": str(tmp_path / "artifact.txt"),
+        "failure": "connection dropped",
+        "raw_response": "b'not json'",
+    }
