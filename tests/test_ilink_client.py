@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import socket
+
 import pytest
+import urllib.request
 
 from codex_thread_bridge.adapters.ilink_client import (
     IlinkClientError,
     IlinkClientFatalError,
     IlinkHttpClient,
+    IlinkClientTransientError,
+    UrllibJsonTransport,
 )
 
 
@@ -50,6 +55,28 @@ def test_get_updates_posts_cursor_and_auth_headers() -> None:
     assert timeout == 12.0
 
 
+def test_get_updates_accepts_real_ilink_response_without_ret() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "msgs": [{"message_id": 1}],
+                "sync_buf": "sync-1",
+                "get_updates_buf": "cursor-2",
+            }
+        ]
+    )
+    client = IlinkHttpClient(
+        "https://ilink.example.test/bot",
+        "secret",
+        transport=transport,
+    )
+
+    response = client.get_updates("cursor-1", timeout_seconds=12.0)
+
+    assert response["msgs"] == [{"message_id": 1}]
+    assert response["get_updates_buf"] == "cursor-2"
+
+
 def test_send_text_uses_context_token_and_text_item() -> None:
     transport = RecordingTransport([{"ret": 0}])
     client = IlinkHttpClient(
@@ -75,6 +102,24 @@ def test_send_text_uses_context_token_and_text_item() -> None:
             ],
         }
     }
+
+
+def test_send_text_accepts_real_ilink_response_without_ret() -> None:
+    transport = RecordingTransport([{}])
+    client = IlinkHttpClient(
+        "https://ilink.example.test/bot",
+        "secret",
+        transport=transport,
+    )
+    client.remember_context(
+        "owner-chat",
+        to_user_id="owner-1",
+        context_token="ctx-1",
+    )
+
+    client.send_text(conversation_id="owner-chat", text="hello")
+
+    assert transport.requests[0][0] == "https://ilink.example.test/bot/sendmessage"
 
 
 def test_send_text_requires_remembered_context() -> None:
@@ -114,7 +159,26 @@ def test_missing_ret_raises_sanitized_error() -> None:
     with pytest.raises(IlinkClientFatalError) as excinfo:
         client.get_updates("", timeout_seconds=1.0)
 
-    assert "ret" in str(excinfo.value)
+    assert "bad" in str(excinfo.value)
+    assert "secret-token" not in str(excinfo.value)
+
+
+def test_send_text_missing_ret_with_error_field_raises() -> None:
+    client = IlinkHttpClient(
+        "https://ilink.example.test/bot",
+        "secret-token",
+        transport=RecordingTransport([{"errmsg": "bad secret-token"}]),
+    )
+    client.remember_context(
+        "owner-chat",
+        to_user_id="owner-1",
+        context_token="ctx-1",
+    )
+
+    with pytest.raises(IlinkClientFatalError) as excinfo:
+        client.send_text(conversation_id="owner-chat", text="hello")
+
+    assert "bad" in str(excinfo.value)
     assert "secret-token" not in str(excinfo.value)
 
 
@@ -127,3 +191,18 @@ def test_malformed_ret_raises_error() -> None:
 
     with pytest.raises(IlinkClientFatalError, match="ret"):
         client.get_updates("", timeout_seconds=1.0)
+
+
+def test_urllib_transport_wraps_socket_timeout(monkeypatch) -> None:
+    def raise_timeout(*args, **kwargs):
+        raise socket.timeout("read timed out")
+
+    monkeypatch.setattr(urllib.request, "urlopen", raise_timeout)
+
+    with pytest.raises(IlinkClientTransientError, match="read timed out"):
+        UrllibJsonTransport().post_json(
+            "https://ilink.example.test/bot/getupdates",
+            {},
+            {},
+            1.0,
+        )

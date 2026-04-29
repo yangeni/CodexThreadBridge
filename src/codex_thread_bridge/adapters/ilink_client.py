@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -48,7 +49,7 @@ class UrllibJsonTransport:
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 payload = response.read().decode("utf-8")
-        except urllib.error.URLError as exc:
+        except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
             reason = getattr(exc, "reason", exc)
             raise IlinkClientTransientError(
                 "iLink HTTP request failed: %s" % reason
@@ -161,6 +162,19 @@ class IlinkHttpClient:
 
     def _raise_for_ret(self, response: dict, operation: str) -> None:
         if "ret" not in response:
+            message = (
+                response.get("errmsg")
+                or response.get("errcode")
+                or response.get("error")
+            )
+            if message:
+                raise IlinkClientFatalError(
+                    "iLink %s failed: %s" % (operation, self._sanitize(message))
+                )
+            if operation == "getupdates" and _looks_like_getupdates_response(response):
+                return
+            if operation == "sendmessage":
+                return
             raise IlinkClientFatalError(
                 "iLink %s failed: missing integer ret" % operation
             )
@@ -180,3 +194,11 @@ class IlinkHttpClient:
         if self._bot_token:
             text = text.replace(self._bot_token, "***")
         return text
+
+
+def _looks_like_getupdates_response(response: dict) -> bool:
+    return (
+        "msgs" in response
+        or "get_updates_buf" in response
+        or "sync_buf" in response
+    )

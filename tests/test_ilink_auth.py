@@ -11,9 +11,11 @@ from codex_thread_bridge.adapters.ilink_auth import (
     IlinkCredentialStore,
     IlinkCredentials,
     IlinkLoginTimeoutError,
+    probe_updates_text,
     render_env_lines,
     summarize_update_senders,
 )
+from codex_thread_bridge.adapters.ilink_client import IlinkClientTransientError
 
 
 class RecordingGetTransport:
@@ -91,6 +93,29 @@ def test_poll_login_returns_credentials_when_confirmed() -> None:
             5.0,
         )
     ]
+
+
+def test_poll_login_normalizes_host_only_baseurl_to_bot_api_base() -> None:
+    transport = RecordingGetTransport(
+        [
+            {
+                "ret": 0,
+                "status": "confirmed",
+                "bot_token": "token-1",
+                "ilink_bot_id": "bot-1",
+                "baseurl": "https://ilinkai.weixin.qq.com",
+            }
+        ]
+    )
+    client = IlinkAuthClient(transport=transport)
+
+    result = client.poll_status("qr-1")
+
+    assert result.credentials == IlinkCredentials(
+        bot_token="token-1",
+        account_id="bot-1",
+        base_url="https://ilinkai.weixin.qq.com/ilink/bot",
+    )
 
 
 def test_wait_for_login_ignores_waiting_status_and_returns_confirmed() -> None:
@@ -171,6 +196,23 @@ def test_credential_store_writes_private_json(tmp_path: Path) -> None:
     assert oct(path.stat().st_mode & 0o777) == "0o600"
 
 
+def test_credential_store_normalizes_existing_host_only_baseurl(tmp_path: Path) -> None:
+    path = tmp_path / "ilink_credentials.json"
+    path.write_text(
+        json.dumps(
+            {
+                "bot_token": "token-1",
+                "account_id": "bot-1",
+                "base_url": "https://ilinkai.weixin.qq.com",
+            }
+        )
+    )
+
+    assert IlinkCredentialStore(path).load().base_url == (
+        "https://ilinkai.weixin.qq.com/ilink/bot"
+    )
+
+
 def test_credential_store_rejects_missing_fields(tmp_path: Path) -> None:
     path = tmp_path / "ilink_credentials.json"
     path.write_text(json.dumps({"bot_token": "token-1"}))
@@ -219,3 +261,26 @@ def test_summarize_update_senders_includes_owner_discovery_fields() -> None:
     assert "hello bridge" in text
     assert "from_user_id=group-user" in text
     assert "conversation_type=group" in text
+
+
+def test_probe_updates_text_reports_transient_timeout(tmp_path: Path) -> None:
+    path = tmp_path / "ilink_credentials.json"
+    IlinkCredentialStore(path).save(
+        IlinkCredentials(
+            bot_token="token-1",
+            account_id="bot-1",
+            base_url="https://ilinkai.weixin.qq.com",
+        )
+    )
+
+    class TimeoutClient:
+        def get_updates(self, cursor: str, timeout_seconds: float) -> dict:
+            raise IlinkClientTransientError("read timed out")
+
+    text = probe_updates_text(
+        credentials_path=path,
+        timeout_seconds=1.0,
+        client_factory=lambda credentials: TimeoutClient(),
+    )
+
+    assert text == "No iLink messages returned before timeout."

@@ -11,7 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Protocol, Sequence
 
-from codex_thread_bridge.adapters.ilink_client import IlinkHttpClient
+from codex_thread_bridge.adapters.ilink_client import (
+    IlinkClientTransientError,
+    IlinkHttpClient,
+)
 
 
 DEFAULT_ILINK_BOT_BASE_URL = "https://ilinkai.weixin.qq.com/ilink/bot"
@@ -154,7 +157,9 @@ class IlinkAuthClient:
         return IlinkCredentials(
             bot_token=_required_string(response, "bot_token", "get_qrcode_status"),
             account_id=_required_string(response, "ilink_bot_id", "get_qrcode_status"),
-            base_url=str(response.get("baseurl") or self.base_url).rstrip("/"),
+            base_url=_normalize_bot_base_url(
+                str(response.get("baseurl") or self.base_url)
+            ),
         )
 
     def _get(
@@ -199,7 +204,9 @@ class IlinkCredentialStore:
             credentials = IlinkCredentials(
                 bot_token=_required_string(raw, "bot_token", "credentials"),
                 account_id=_required_string(raw, "account_id", "credentials"),
-                base_url=_required_string(raw, "base_url", "credentials").rstrip("/"),
+                base_url=_normalize_bot_base_url(
+                    _required_string(raw, "base_url", "credentials")
+                ),
             )
         except IlinkAuthError as exc:
             raise IlinkAuthError("invalid iLink credentials: %s" % exc) from exc
@@ -253,6 +260,26 @@ def summarize_update_senders(batch: dict) -> str:
             )
         )
     return "\n".join(lines)
+
+
+def probe_updates_text(
+    *,
+    credentials_path: Path,
+    timeout_seconds: float,
+    client_factory: Optional[Callable[[IlinkCredentials], object]] = None,
+) -> str:
+    credentials = IlinkCredentialStore(credentials_path).load()
+    if client_factory is None:
+        client = IlinkHttpClient(credentials.base_url, credentials.bot_token)
+    else:
+        client = client_factory(credentials)
+    try:
+        batch = client.get_updates("", timeout_seconds=timeout_seconds)
+    except IlinkClientTransientError as exc:
+        if _looks_like_timeout(exc):
+            return "No iLink messages returned before timeout."
+        raise
+    return summarize_update_senders(batch)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -327,10 +354,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         return 0
     if args.command == "probe-updates":
-        credentials = IlinkCredentialStore(args.credentials_path).load()
-        client = IlinkHttpClient(credentials.base_url, credentials.bot_token)
-        batch = client.get_updates("", timeout_seconds=args.timeout_seconds)
-        print(summarize_update_senders(batch))
+        print(
+            probe_updates_text(
+                credentials_path=args.credentials_path,
+                timeout_seconds=args.timeout_seconds,
+            )
+        )
         return 0
     raise AssertionError("unreachable command")
 
@@ -348,6 +377,13 @@ def _first_string(source: dict, keys: Sequence[str]) -> Optional[str]:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _normalize_bot_base_url(value: str) -> str:
+    base_url = value.rstrip("/")
+    if base_url.endswith("/ilink/bot"):
+        return base_url
+    return "%s/ilink/bot" % base_url
 
 
 def _display_value(value: object) -> str:
@@ -384,6 +420,11 @@ def _message_preview(msg: dict) -> str:
     if len(preview) > 120:
         return preview[:117] + "..."
     return preview
+
+
+def _looks_like_timeout(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "timed out" in text or "timeout" in text
 
 
 if __name__ == "__main__":
