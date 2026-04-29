@@ -23,8 +23,9 @@ The current runtime behavior is:
   `approval_policy=never`.
 - Status/refresh/list do not create model turns; alias listing/status commands
   are read-only Gateway/controller operations.
-- Artifacts are only eligible for delivery to the owner private chat after
-  local path, root, freshness, size, and sensitive-path checks.
+- Artifacts are only eligible for owner-private delivery after local path, root,
+  freshness, size, and sensitive-path checks; v0.2 currently returns
+  would-send results until real channel upload wiring is added.
 - Feishu and Windows remain adapter targets, not v0.2 deliverables.
 
 ## Project Layout
@@ -68,8 +69,9 @@ CodexThreadBridge/
 - Group mode: owner-approved WeChat groups get isolated read-only QA sessions,
   not write-capable work aliases.
 - Result mode: return the completed response as one message.
-- Artifact mode: detected local files are listed and delivered only after
-  safety checks, and only through owner private chat.
+- Artifact mode: detected local files are listed after safety checks. `/sendfile`
+  is owner-private only and currently returns would-send results; real channel
+  upload wiring remains a later integration step.
 
 ## Hard Boundaries
 
@@ -94,7 +96,7 @@ CodexThreadBridge/
 /status [alias]                 Read controller status without a model turn.
 /refresh [alias]                Read local history without a model turn.
 /artifacts [alias]              List latest detected artifacts.
-/sendfile <artifact_id|all>     Send allowed artifacts to owner private chat.
+/sendfile <artifact_id|all>     Return owner-private would-send results for allowed artifacts.
 /group approve <group> [alias]  Owner-only approval for isolated group QA.
 /group list                     Owner-only group listing.
 /group status <group|alias>     Owner-only group status.

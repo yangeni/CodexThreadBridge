@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import time
 from typing import Optional
 
@@ -12,6 +13,7 @@ from codex_thread_bridge.models import (
     OutgoingMessage,
 )
 from codex_thread_bridge.policy import PolicyEngine
+from codex_thread_bridge.refresh import read_new_items
 
 
 class Gateway:
@@ -34,25 +36,17 @@ class Gateway:
 
         if parsed.kind == CommandKind.ADD_ALIAS:
             alias, session_id = parsed.args
-            status = self.controller.status(session_id)
-            cwd = self._workspace_from_status(status)
-            if cwd is None:
-                return OutgoingMessage(
-                    msg.conversation_id,
-                    "Alias cannot be added because the session workspace/cwd is unknown.",
-                )
-            policy = ExecutionPolicy.work_default(cwd)
-            self.store.upsert_alias(
-                alias=alias,
-                session_id=session_id,
-                label=alias,
-                default_cwd=cwd,
-                policy=policy,
-                created_by=msg.sender_id,
-            )
+            return self._handle_add_alias(msg, alias, session_id)
+
+        if parsed.kind == CommandKind.BIND_COMPAT:
+            session_id = parsed.args[0]
+            add_reply = self._handle_add_alias(msg, "default", session_id)
+            if not add_reply.text.startswith("Added alias"):
+                return add_reply
+            self.store.set_active_alias(msg.context_key, "default", msg.sender_id)
             return OutgoingMessage(
                 msg.conversation_id,
-                "Added alias %s -> %s" % (alias, session_id),
+                "Bound default -> %s" % session_id,
             )
 
         if parsed.kind == CommandKind.USE_ALIAS:
@@ -69,6 +63,18 @@ class Gateway:
                 "Using alias %s" % alias_name,
             )
 
+        if parsed.kind == CommandKind.REMOVE_ALIAS:
+            alias_name = parsed.args[0]
+            if self.store.remove_alias(alias_name):
+                return OutgoingMessage(
+                    msg.conversation_id,
+                    "Removed alias %s" % alias_name,
+                )
+            return OutgoingMessage(
+                msg.conversation_id,
+                "Unknown alias: %s" % alias_name,
+            )
+
         if parsed.kind == CommandKind.LIST_ALIASES:
             aliases = self.store.list_aliases()
             if not aliases:
@@ -79,11 +85,21 @@ class Gateway:
         if parsed.kind == CommandKind.STATUS:
             return self._handle_status(msg, parsed.args)
 
+        if parsed.kind == CommandKind.REFRESH:
+            return self._handle_refresh(msg, parsed.args)
+
+        if parsed.kind == CommandKind.SEND_ONCE:
+            alias_name, text = parsed.args
+            return self._dispatch_to_alias(msg, alias_name, text, active_context=False)
+
         if parsed.kind == CommandKind.ARTIFACTS:
             return self._handle_artifacts(msg, parsed.args)
 
         if parsed.kind == CommandKind.SEND_FILE:
             return self._handle_sendfile(msg, parsed.args[0])
+
+        if parsed.kind == CommandKind.HELP:
+            return OutgoingMessage(msg.conversation_id, _help_text())
 
         if parsed.kind == CommandKind.GROUP_APPROVE:
             return self._handle_group_approve(msg, parsed.args)
@@ -120,12 +136,25 @@ class Gateway:
                 msg.conversation_id,
                 "No active thread. Use /use <alias> first.",
             )
+        return self._dispatch_to_alias(msg, active_alias, text, active_context=True)
 
-        alias = self.store.get_alias(active_alias)
+    def _dispatch_to_alias(
+        self,
+        msg: IncomingMessage,
+        alias_name: str,
+        text: str,
+        active_context: bool,
+    ) -> OutgoingMessage:
+        alias = self.store.get_alias(alias_name)
         if alias is None:
+            if active_context:
+                return OutgoingMessage(
+                    msg.conversation_id,
+                    "Active alias no longer exists: %s" % alias_name,
+                )
             return OutgoingMessage(
                 msg.conversation_id,
-                "Active alias no longer exists: %s" % active_alias,
+                "Unknown alias: %s" % alias_name,
             )
 
         status = self.controller.status(alias.session_id)
@@ -168,6 +197,33 @@ class Gateway:
         if result.approval_summary:
             return OutgoingMessage(msg.conversation_id, result.approval_summary)
         return OutgoingMessage(msg.conversation_id, result.text)
+
+    def _handle_add_alias(
+        self,
+        msg: IncomingMessage,
+        alias: str,
+        session_id: str,
+    ) -> OutgoingMessage:
+        status = self.controller.status(session_id)
+        cwd = self._workspace_from_status(status)
+        if cwd is None:
+            return OutgoingMessage(
+                msg.conversation_id,
+                "Alias cannot be added because the session workspace/cwd is unknown.",
+            )
+        policy = ExecutionPolicy.work_default(cwd)
+        self.store.upsert_alias(
+            alias=alias,
+            session_id=session_id,
+            label=alias,
+            default_cwd=cwd,
+            policy=policy,
+            created_by=msg.sender_id,
+        )
+        return OutgoingMessage(
+            msg.conversation_id,
+            "Added alias %s -> %s" % (alias, session_id),
+        )
 
     def _handle_group(self, msg: IncomingMessage) -> OutgoingMessage:
         parsed = parse_command(msg.text, msg.conversation_type)
@@ -398,6 +454,48 @@ class Gateway:
         )
         return OutgoingMessage(msg.conversation_id, text)
 
+    def _handle_refresh(
+        self,
+        msg: IncomingMessage,
+        args: tuple[str, ...],
+    ) -> OutgoingMessage:
+        if args:
+            alias_name = args[0]
+        else:
+            alias_name = self.store.get_active_alias(msg.context_key)
+            if alias_name is None:
+                return OutgoingMessage(
+                    msg.conversation_id,
+                    "No active thread. Use /use <alias> first.",
+                )
+
+        alias = self.store.get_alias(alias_name)
+        if alias is None:
+            return OutgoingMessage(
+                msg.conversation_id,
+                "Unknown alias: %s" % alias_name,
+            )
+
+        history_path = self._session_history_path(alias.session_id)
+        if history_path is None:
+            return OutgoingMessage(
+                msg.conversation_id,
+                "Unable to read local session history for %s." % alias.alias,
+            )
+
+        last_seen_line = self.store.get_refresh_offset(alias.alias)
+        try:
+            result = read_new_items(history_path, last_seen_line)
+        except OSError:
+            return OutgoingMessage(
+                msg.conversation_id,
+                "Unable to read local session history for %s." % alias.alias,
+            )
+
+        if not result.source_truncated:
+            self.store.set_refresh_offset(alias.alias, result.next_line)
+        return OutgoingMessage(msg.conversation_id, result.summary)
+
     def _handle_artifacts(
         self, msg: IncomingMessage, args: tuple[str, ...]
     ) -> OutgoingMessage:
@@ -513,3 +611,39 @@ class Gateway:
             if value:
                 return str(value)
         return None
+
+    def _session_history_path(self, session_id: str) -> Optional[Path]:
+        local_path = self.config.data_dir / "sessions" / ("%s.jsonl" % session_id)
+        if local_path.exists():
+            return local_path
+
+        codex_sessions = Path.home() / ".codex" / "sessions"
+        if not codex_sessions.exists():
+            return None
+
+        matches = list(codex_sessions.glob("**/*%s.jsonl" % session_id))
+        if not matches:
+            return None
+        return max(matches, key=lambda path: path.stat().st_mtime)
+
+
+def _help_text() -> str:
+    return "\n".join(
+        [
+            "/add <alias> <session_id>",
+            "/bind <session_id>",
+            "/use <alias>",
+            "/list",
+            "/remove <alias>",
+            "/status [alias]",
+            "/refresh [alias]",
+            "/send <alias> <message>",
+            "/artifacts [alias]",
+            "/sendfile <artifact_id|all>",
+            "/group approve <group> [alias]",
+            "/group list",
+            "/group status <group|alias>",
+            "/group reset <group|alias>",
+            "/group disable <group|alias>",
+        ]
+    )

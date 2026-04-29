@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import Optional, get_type_hints
 
@@ -352,6 +353,74 @@ def test_private_list_aliases_formats_entries_and_empty_state(tmp_path: Path) ->
     assert "code -> 019-code" in list_reply.text
 
 
+def test_private_remove_alias_clears_alias_and_active_context(tmp_path: Path) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    controller.status_by_session["019-code"] = _ready_status(
+        cwd="/tmp/codex-target/code"
+    )
+
+    gateway.handle(private_msg("/add code 019-code"))
+    gateway.handle(private_msg("/use code"))
+    reply = gateway.handle(private_msg("/remove code"))
+    dispatch_reply = gateway.handle(private_msg("continue implementation"))
+
+    assert "Removed alias code" in reply.text
+    assert store.get_alias("code") is None
+    assert "No active thread" in dispatch_reply.text
+    assert controller.starts == []
+
+
+def test_private_bind_compat_adds_default_alias_and_selects_it(tmp_path: Path) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    controller.status_by_session["019-code"] = _ready_status(
+        cwd="/tmp/codex-target/code"
+    )
+
+    bind_reply = gateway.handle(private_msg("/bind 019-code"))
+    dispatch_reply = gateway.handle(private_msg("continue implementation"))
+    alias = store.get_alias("default")
+
+    assert "Bound default -> 019-code" in bind_reply.text
+    assert alias is not None
+    assert dispatch_reply.text == "done"
+    assert controller.starts[0]["session_id"] == "019-code"
+
+
+def test_private_send_once_dispatches_without_switching_active_alias(
+    tmp_path: Path,
+) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    controller.status_by_session["019-code"] = _ready_status(
+        cwd="/tmp/codex-target/code"
+    )
+
+    gateway.handle(private_msg("/add code 019-code"))
+    reply = gateway.handle(private_msg("/send code run smoke"))
+
+    assert reply.text == "done"
+    assert controller.starts[0]["message"] == "run smoke"
+    assert store.get_active_alias(private_msg("check").context_key) is None
+
+
+def test_private_send_once_unknown_alias_is_clear(tmp_path: Path) -> None:
+    gateway, _config, _store, controller = _gateway_for(tmp_path)
+
+    reply = gateway.handle(private_msg("/send missing run smoke"))
+
+    assert "Unknown alias: missing" in reply.text
+    assert controller.starts == []
+
+
+def test_private_help_lists_available_commands(tmp_path: Path) -> None:
+    gateway, _config, _store, controller = _gateway_for(tmp_path)
+
+    reply = gateway.handle(private_msg("/help"))
+
+    assert "/add <alias> <session_id>" in reply.text
+    assert "/refresh [alias]" in reply.text
+    assert controller.starts == []
+
+
 def test_private_missing_active_alias_is_reported(tmp_path: Path) -> None:
     gateway, config, _store, _controller = _gateway_for(tmp_path)
     _controller.status_by_session["019-code"] = _ready_status(
@@ -396,6 +465,70 @@ def test_private_status_without_active_alias_is_clear(tmp_path: Path) -> None:
     gateway, _config, _store, controller = _gateway_for(tmp_path)
 
     reply = gateway.handle(private_msg("/status"))
+
+    assert "No active thread" in reply.text
+    assert controller.starts == []
+
+
+def test_private_refresh_reads_local_session_without_model_turn(tmp_path: Path) -> None:
+    gateway, config, store, controller = _gateway_for(tmp_path)
+    controller.status_by_session["019-code"] = _ready_status(
+        cwd="/tmp/codex-target/code"
+    )
+    session_path = config.data_dir / "sessions" / "019-code.jsonl"
+    session_path.parent.mkdir(parents=True)
+    rows = [
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}],
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "world"}],
+            },
+        },
+    ]
+    session_path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    gateway.handle(private_msg("/add code 019-code"))
+    reply = gateway.handle(private_msg("/refresh code"))
+
+    assert reply.text == "user: hello\nassistant: world"
+    assert store.get_refresh_offset("code") == 2
+    assert controller.starts == []
+
+
+def test_private_refresh_missing_history_does_not_advance_offset(
+    tmp_path: Path,
+) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    controller.status_by_session["019-code"] = _ready_status(
+        cwd="/tmp/codex-target/code"
+    )
+    gateway.handle(private_msg("/add code 019-code"))
+    store.set_refresh_offset("code", 7)
+
+    reply = gateway.handle(private_msg("/refresh code"))
+
+    assert "Unable to read local session history" in reply.text
+    assert store.get_refresh_offset("code") == 7
+    assert controller.starts == []
+
+
+def test_private_refresh_without_active_alias_is_clear(tmp_path: Path) -> None:
+    gateway, _config, _store, controller = _gateway_for(tmp_path)
+
+    reply = gateway.handle(private_msg("/refresh"))
 
     assert "No active thread" in reply.text
     assert controller.starts == []

@@ -96,9 +96,9 @@ v0.2 使用 alias 模型替代 v0.1 的单一 `/bind` 叙述。owner 私聊命�
 状态使用 SQLite 保存：
 
 ```text
-aliases
-active_contexts
-groups
+thread_aliases
+contexts
+wechat_groups
 artifact_runs
 artifacts
 ```
@@ -148,13 +148,13 @@ IncomingMessage
 私聊命令：
 
 - `/add <alias> <session_id>`：添加 alias。
-- `/bind <session_id>`：兼容解析入口，非 v0.2 主路径。
+- `/bind <session_id>`：兼容快捷入口，相当于 `/add default <session_id>` 后 `/use default`。
 - `/use <alias>`：设置 active alias。
 - `/list`：列出 alias，不调用模型。
 - `/status [alias]`：读取 controller status，不调用模型。
-- `/refresh [alias]`：只读本地历史设计边界，不允许创建模型 turn。
+- `/refresh [alias]`：只读本地历史，不创建模型 turn。
 - `/artifacts [alias]`：列出最近一次 run 的 artifact 检测结果。
-- `/sendfile <artifact_id|all>`：只发送 allowed artifact。
+- `/sendfile <artifact_id|all>`：只允许 owner 私聊触发 allowed artifact；当前 Gateway 返回 would-send 结果，真实通道上传由后续 channel wiring 接入。
 - `/group approve/list/status/reset/disable`：owner 私聊管理群 QA。
 
 普通消息：
@@ -222,13 +222,12 @@ Feishu 后续接入仍应遵守：不在群聊泄露 token、traceback 或敏感
 流程：
 
 ```text
-读取 binding
--> 找到 bound_session_id
--> 读取本地 Codex session JSONL
--> 计算当前 session_head
--> 与 last_seen_session_head 比较
+读取 alias 或 active alias
+-> 找到 session_id
+-> 定位本地 Codex session JSONL
+-> 读取 refresh_offset 之后的新增行
 -> 提取新增 user/assistant 文本摘要
--> 更新 last_seen_session_head
+-> 更新 refresh_offset
 -> 回传新增内容
 ```
 
@@ -242,7 +241,7 @@ Feishu 后续接入仍应遵守：不在群聊泄露 token、traceback 或敏感
 
 常见错误：
 
-- 未绑定：提示 `/bind <session_id>`。
+- 未选择 active alias：提示 `/use <alias>`。
 - session 不存在：提示检查 session id。
 - active lock 被其他 owner 持有：提示稍后重试或手动确认 recover。
 - `dirty=true` 或 `reconcile_required=true`：提示需要 reconcile。
@@ -304,9 +303,9 @@ v0.2 通过条件：
 - 本地模拟 adapter 能完成 `/add`、`/use`、普通消息、返回的闭环。
 - owner 私聊可以通过 alias 接入至少一个已有 Codex session。
 - 已批准微信群使用隔离 read-only QA session。
-- `/refresh` 可读取 App 侧手动新增内容，且不消耗模型额度。
+- `/refresh` 可读取本地 session JSONL 新增内容，且不消耗模型额度。
 - `/status`、`/list`、群状态命令不消耗模型额度。
-- Artifact gating 能区分 allowed/blocked，并只允许 owner 私聊发送。
+- Artifact gating 能区分 allowed/blocked；当前 `/sendfile` 只在 owner 私聊返回 would-send 结果，真实上传由后续 channel wiring 接入。
 - 默认安全策略阻止非白名单用户。
 - OpeniLink boundary 可接收 normalized inbound，并通过 ChannelPort 回发文本或文件。
 - Feishu 和 Windows 不被当作 v0.2 完成交付项。
