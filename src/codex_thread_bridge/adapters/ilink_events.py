@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 class IlinkEventError(ValueError):
@@ -21,7 +21,10 @@ class MappedIlinkEvent:
     context: IlinkConversationContext
 
 
-def map_update_batch(batch: Dict[str, Any]) -> Tuple[MappedIlinkEvent, ...]:
+def map_update_batch(
+    batch: Dict[str, Any],
+    on_error: Optional[Callable[[int, IlinkEventError], None]] = None,
+) -> Tuple[MappedIlinkEvent, ...]:
     if not isinstance(batch, dict):
         raise IlinkEventError("update batch must be an object")
     msgs = batch.get("msgs", ())
@@ -29,7 +32,18 @@ def map_update_batch(batch: Dict[str, Any]) -> Tuple[MappedIlinkEvent, ...]:
         return ()
     if not isinstance(msgs, list):
         raise IlinkEventError("msgs must be a list")
-    return tuple(event for event in (_map_message(msg) for msg in msgs) if event is not None)
+    events: List[MappedIlinkEvent] = []
+    for index, msg in enumerate(msgs):
+        try:
+            event = _map_message(msg)
+        except IlinkEventError as error:
+            if on_error is None:
+                raise
+            on_error(index, error)
+            continue
+        if event is not None:
+            events.append(event)
+    return tuple(events)
 
 
 def _map_message(msg: Any) -> Optional[MappedIlinkEvent]:
@@ -37,9 +51,9 @@ def _map_message(msg: Any) -> Optional[MappedIlinkEvent]:
         raise IlinkEventError("message must be an object")
     if msg.get("message_state", 2) != 2:
         return None
-    message_id = str(_required(msg, "message_id"))
+    message_id = _message_id(msg)
     sender_id = _required_string(msg, "from_user_id")
-    context_token = str(msg.get("context_token") or "")
+    context_token = _required_string(msg, "context_token")
     conversation_type = _conversation_type(msg)
     conversation_id = _conversation_id(msg, conversation_type, sender_id)
     text, attachments = _items(msg.get("item_list", ()), message_id)
@@ -116,6 +130,17 @@ def _required(msg: Dict[str, Any], field: str) -> Any:
     if field not in msg:
         raise IlinkEventError("missing required message field: %s" % field)
     return msg[field]
+
+
+def _message_id(msg: Dict[str, Any]) -> str:
+    value = _required(msg, "message_id")
+    if isinstance(value, bool):
+        raise IlinkEventError("invalid message field: message_id")
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str) and value.strip():
+        return value
+    raise IlinkEventError("invalid message field: message_id")
 
 
 def _required_string(msg: Dict[str, Any], field: str) -> str:

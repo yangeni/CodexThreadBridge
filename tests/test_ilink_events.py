@@ -79,3 +79,65 @@ def test_missing_required_message_field_raises_clear_error() -> None:
 
     with pytest.raises(IlinkEventError, match="from_user_id"):
         map_update_batch(payload)
+
+
+def test_batch_mapping_can_skip_malformed_messages_with_error_callback() -> None:
+    payload = _fixture("ilink_getupdates_text.json")
+    malformed = dict(payload["msgs"][0])
+    del malformed["from_user_id"]
+    valid = dict(payload["msgs"][0])
+    valid["message_id"] = "valid-2"
+    valid["from_user_id"] = "owner-2"
+    valid["context_token"] = "ctx-owner-2"
+    valid["item_list"] = [{"type": 1, "text_item": {"text": "valid"}}]
+    payload["msgs"] = [malformed, valid]
+    errors = []
+
+    events = map_update_batch(
+        payload,
+        on_error=lambda index, error: errors.append((index, error)),
+    )
+
+    assert len(events) == 1
+    assert events[0].payload["message_id"] == "valid-2"
+    assert events[0].payload["sender_id"] == "owner-2"
+    assert events[0].payload["text"] == "valid"
+    assert len(errors) == 1
+    assert errors[0][0] == 0
+    assert isinstance(errors[0][1], IlinkEventError)
+    assert "from_user_id" in str(errors[0][1])
+
+
+def test_missing_context_token_raises_clear_error() -> None:
+    payload = _fixture("ilink_getupdates_text.json")
+    del payload["msgs"][0]["context_token"]
+
+    with pytest.raises(IlinkEventError, match="context_token"):
+        map_update_batch(payload)
+
+
+@pytest.mark.parametrize("context_token", ["", "   ", 123, {}, [], True])
+def test_invalid_context_token_raises_clear_error(context_token: Any) -> None:
+    payload = _fixture("ilink_getupdates_text.json")
+    payload["msgs"][0]["context_token"] = context_token
+
+    with pytest.raises(IlinkEventError, match="context_token"):
+        map_update_batch(payload)
+
+
+def test_string_message_id_maps_without_coercion() -> None:
+    payload = _fixture("ilink_getupdates_text.json")
+    payload["msgs"][0]["message_id"] = "msg-abc"
+
+    events = map_update_batch(payload)
+
+    assert events[0].payload["message_id"] == "msg-abc"
+
+
+@pytest.mark.parametrize("message_id", ["", "   ", True, False, {}, []])
+def test_invalid_message_id_raises_clear_error(message_id: Any) -> None:
+    payload = _fixture("ilink_getupdates_text.json")
+    payload["msgs"][0]["message_id"] = message_id
+
+    with pytest.raises(IlinkEventError, match="message_id"):
+        map_update_batch(payload)
