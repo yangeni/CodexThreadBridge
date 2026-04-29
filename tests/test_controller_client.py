@@ -114,6 +114,32 @@ def test_mcp_controller_client_status_normalizes_controller_session() -> None:
     assert status["controller_status"]["session"]["session_id"] == "019-code"
 
 
+def test_mcp_controller_client_status_preserves_workspace_metadata() -> None:
+    transport = FakeTransport(
+        [
+            {"capabilities": {"tools": {}}},
+            tool_result(
+                {
+                    "runs": [],
+                    "session": {
+                        "session_id": "019-code",
+                        "status": "released",
+                        "session_head": "head-1",
+                        "cwd": "/tmp/thread-cwd",
+                    },
+                    "workspace_root": "/tmp/workspace-root",
+                }
+            ),
+        ]
+    )
+    client = McpControllerClient(["fake-mcp"], transport_factory=lambda: transport)
+
+    status = client.status("019-code")
+
+    assert status["cwd"] == "/tmp/thread-cwd"
+    assert status["workspace_root"] == "/tmp/workspace-root"
+
+
 def test_start_or_send_runs_controller_lifecycle_and_returns_text() -> None:
     transport = FakeTransport(
         [
@@ -274,6 +300,207 @@ def test_start_or_send_releases_after_close_failure_when_ack_succeeded() -> None
         "cross_thread_close",
         "cross_thread_release",
     ]
+
+
+def test_start_or_send_cleans_up_lock_after_wait_failure() -> None:
+    transport = FakeTransport(
+        [
+            {"capabilities": {"tools": {}}},
+            tool_result(
+                {
+                    "run_id": "run-1",
+                    "session_id": "019-code",
+                    "session_head": "head-start",
+                    "lock_token": "lock-1",
+                    "last_event_seq": 7,
+                    "run": {"run_id": "run-1", "session_id": "019-code"},
+                }
+            ),
+            McpControllerClientError("wait failed"),
+            tool_result({"run": {"run_id": "run-1", "status": "cancelled"}}),
+            tool_result({"run": {"run_id": "run-1", "status": "cancelled"}}),
+            tool_result({"run": {"run_id": "run-1", "closed_at": 1.0}}),
+            tool_result({"session": {"session_id": "019-code", "status": "released"}}),
+        ]
+    )
+    client = McpControllerClient(["fake-mcp"], transport_factory=lambda: transport)
+
+    with pytest.raises(McpControllerClientError, match="wait failed"):
+        client.start_or_send(
+            session_id="019-code",
+            cwd="/tmp/project",
+            message="hello",
+            owner="ctb-private:owner-1",
+            policy=ExecutionPolicy.work_default("/tmp/project"),
+            idempotency_key="m-1:code",
+            expected_session_head="head-1",
+        )
+
+    tool_calls = [
+        params["name"]
+        for method, params in transport.requests
+        if method == "tools/call"
+    ]
+    assert tool_calls == [
+        "cross_thread_start",
+        "cross_thread_wait_any",
+        "cross_thread_cancel",
+        "cross_thread_delivery_ack",
+        "cross_thread_close",
+        "cross_thread_release",
+    ]
+
+
+def test_start_or_send_cleans_up_after_malformed_start_missing_lock_token() -> None:
+    transport = FakeTransport(
+        [
+            {"capabilities": {"tools": {}}},
+            tool_result(
+                {
+                    "run_id": "run-1",
+                    "session_id": "019-code",
+                    "session_head": "head-start",
+                    "last_event_seq": 7,
+                    "run": {"run_id": "run-1", "session_id": "019-code"},
+                }
+            ),
+            tool_result({"run": {"run_id": "run-1", "status": "cancelled"}}),
+            tool_result({"run": {"run_id": "run-1", "status": "cancelled"}}),
+            tool_result({"run": {"run_id": "run-1", "closed_at": 1.0}}),
+        ]
+    )
+    client = McpControllerClient(["fake-mcp"], transport_factory=lambda: transport)
+
+    with pytest.raises(McpControllerClientError, match="lock_token"):
+        client.start_or_send(
+            session_id="019-code",
+            cwd="/tmp/project",
+            message="hello",
+            owner="ctb-private:owner-1",
+            policy=ExecutionPolicy.work_default("/tmp/project"),
+            idempotency_key="m-1:code",
+            expected_session_head="head-1",
+        )
+
+    tool_calls = [
+        params["name"]
+        for method, params in transport.requests
+        if method == "tools/call"
+    ]
+    assert tool_calls == [
+        "cross_thread_start",
+        "cross_thread_cancel",
+        "cross_thread_delivery_ack",
+        "cross_thread_close",
+    ]
+
+
+def test_start_or_send_cleans_up_after_malformed_start_missing_new_session_id() -> None:
+    transport = FakeTransport(
+        [
+            {"capabilities": {"tools": {}}},
+            tool_result(
+                {
+                    "run_id": "run-1",
+                    "session_head": "head-start",
+                    "lock_token": "lock-1",
+                    "last_event_seq": 7,
+                    "run": {"run_id": "run-1"},
+                }
+            ),
+            tool_result({"run": {"run_id": "run-1", "status": "cancelled"}}),
+            tool_result({"run": {"run_id": "run-1", "status": "cancelled"}}),
+            tool_result({"run": {"run_id": "run-1", "closed_at": 1.0}}),
+        ]
+    )
+    client = McpControllerClient(["fake-mcp"], transport_factory=lambda: transport)
+
+    with pytest.raises(McpControllerClientError, match="session_id"):
+        client.start_or_send(
+            session_id=None,
+            cwd="/tmp/project",
+            message="hello",
+            owner="ctb-private:owner-1",
+            policy=ExecutionPolicy.work_default("/tmp/project"),
+            idempotency_key="m-1:code",
+            expected_session_head=None,
+        )
+
+    tool_calls = [
+        params["name"]
+        for method, params in transport.requests
+        if method == "tools/call"
+    ]
+    assert tool_calls == [
+        "cross_thread_start",
+        "cross_thread_cancel",
+        "cross_thread_delivery_ack",
+        "cross_thread_close",
+    ]
+
+
+def test_start_or_send_cleans_up_after_delivery_ack_failure() -> None:
+    transport = FakeTransport(
+        [
+            {"capabilities": {"tools": {}}},
+            tool_result(
+                {
+                    "run_id": "run-1",
+                    "session_id": "019-code",
+                    "session_head": "head-start",
+                    "lock_token": "lock-1",
+                    "last_event_seq": 7,
+                    "run": {"run_id": "run-1", "session_id": "019-code"},
+                }
+            ),
+            tool_result({"status": "ready", "runs": [{"run_id": "run-1"}]}),
+            tool_result(
+                {
+                    "run": {
+                        "run_id": "run-1",
+                        "session_id": "019-code",
+                        "status": "completed",
+                        "actual_session_head": "head-2",
+                    },
+                    "events": [],
+                    "result_text": "done text",
+                }
+            ),
+            McpControllerClientError("ack failed"),
+            tool_result({"run": {"run_id": "run-1", "status": "cancelled"}}),
+            tool_result({"run": {"run_id": "run-1", "status": "cancelled"}}),
+            tool_result({"run": {"run_id": "run-1", "closed_at": 1.0}}),
+            tool_result({"session": {"session_id": "019-code", "status": "released"}}),
+        ]
+    )
+    client = McpControllerClient(["fake-mcp"], transport_factory=lambda: transport)
+
+    with pytest.raises(McpControllerClientError, match="ack failed"):
+        client.start_or_send(
+            session_id="019-code",
+            cwd="/tmp/project",
+            message="hello",
+            owner="ctb-private:owner-1",
+            policy=ExecutionPolicy.work_default("/tmp/project"),
+            idempotency_key="m-1:code",
+            expected_session_head="head-1",
+        )
+
+    tool_calls = [
+        params["name"]
+        for method, params in transport.requests
+        if method == "tools/call"
+    ]
+    assert tool_calls == [
+        "cross_thread_start",
+        "cross_thread_wait_any",
+        "cross_thread_read_result",
+        "cross_thread_delivery_ack",
+        "cross_thread_cancel",
+        "cross_thread_delivery_ack",
+        "cross_thread_close",
+        "cross_thread_release",
+    ]
     assert transport.requests[-1][1]["arguments"] == {
         "session_id": "019-code",
         "lock_token": "lock-1",
@@ -344,7 +571,7 @@ def test_start_or_send_returns_approval_summary_for_blocked_result() -> None:
     assert result.approval_summary == "Controller run blocked: approval_required"
 
 
-def test_start_or_send_does_not_close_or_release_when_wait_times_out() -> None:
+def test_start_or_send_attempts_cleanup_when_wait_times_out() -> None:
     transport = FakeTransport(
         [
             {"capabilities": {"tools": {}}},
@@ -390,7 +617,14 @@ def test_start_or_send_does_not_close_or_release_when_wait_times_out() -> None:
         for method, params in transport.requests
         if method == "tools/call"
     ]
-    assert tool_calls == ["cross_thread_start", "cross_thread_wait_any"]
+    assert tool_calls == [
+        "cross_thread_start",
+        "cross_thread_wait_any",
+        "cross_thread_cancel",
+        "cross_thread_delivery_ack",
+        "cross_thread_close",
+        "cross_thread_release",
+    ]
     assert transport.closed
 
 

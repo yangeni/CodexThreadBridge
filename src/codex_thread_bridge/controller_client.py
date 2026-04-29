@@ -319,6 +319,10 @@ class McpControllerClient:
         expected_session_head: Optional[str],
     ) -> ControllerRunResult:
         transport = self._open_transport()
+        run_id = None
+        lock_token = None
+        result_session_id = session_id
+        delivered = False
         try:
             self._initialize(transport)
             payload = build_start_payload(
@@ -333,81 +337,84 @@ class McpControllerClient:
             )
             started = self._call_tool(transport, "cross_thread_start", payload)
             run_id = self._run_id(started)
-            lock_token = self._lock_token(started)
-            result_session_id = self._session_id(started, session_id)
-            after_seq = self._last_event_seq(started)
 
-            waited = self._call_tool(
-                transport,
-                "cross_thread_wait_any",
-                {
-                    "run_ids": [run_id],
-                    "after_seq": after_seq,
-                    "timeout_ms": self.timeout_ms,
-                    "include_progress": False,
-                },
-            )
-            if waited.get("status") != "ready":
-                wait_status = self._first_str(waited.get("status"), "unknown")
-                if wait_status == "timeout":
+            try:
+                lock_token = self._lock_token(started)
+                result_session_id = self._session_id(started, session_id)
+                after_seq = self._last_event_seq(started)
+
+                waited = self._call_tool(
+                    transport,
+                    "cross_thread_wait_any",
+                    {
+                        "run_ids": [run_id],
+                        "after_seq": after_seq,
+                        "timeout_ms": self.timeout_ms,
+                        "include_progress": False,
+                    },
+                )
+                if waited.get("status") != "ready":
+                    wait_status = self._first_str(waited.get("status"), "unknown")
+                    if wait_status == "timeout":
+                        raise McpControllerClientError(
+                            "controller run %s timed out" % run_id
+                        )
                     raise McpControllerClientError(
-                        "controller run %s timed out" % run_id
+                        "controller run %s not ready: %s" % (run_id, wait_status)
                     )
-                raise McpControllerClientError(
-                    "controller run %s not ready: %s" % (run_id, wait_status)
+                result = self._call_tool(
+                    transport,
+                    "cross_thread_read_result",
+                    {"run_id": run_id},
                 )
-            result = self._call_tool(
-                transport,
-                "cross_thread_read_result",
-                {"run_id": run_id},
-            )
-            run = self._run(result)
-            result_session_id = self._first_str(
-                run.get("session_id"),
-                result.get("session_id"),
-                result_session_id,
-            )
-            session_head = self._first_str(
-                run.get("actual_session_head"),
-                run.get("session_head"),
-                result.get("session_head"),
-                started.get("session_head"),
-                "",
-            )
-            status = self._first_str(run.get("status"), started.get("status"), "unknown")
-            text = result.get("result_text")
-            if text is None:
-                text = result.get("text", "")
-            if not isinstance(text, str):
-                text = str(text)
-            approval_summary = self._approval_summary(run)
+                run = self._run(result)
+                result_session_id = self._first_str(
+                    run.get("session_id"),
+                    result.get("session_id"),
+                    result_session_id,
+                )
+                session_head = self._first_str(
+                    run.get("actual_session_head"),
+                    run.get("session_head"),
+                    result.get("session_head"),
+                    started.get("session_head"),
+                    "",
+                )
+                status = self._first_str(
+                    run.get("status"), started.get("status"), "unknown"
+                )
+                text = result.get("result_text")
+                if text is None:
+                    text = result.get("text", "")
+                if not isinstance(text, str):
+                    text = str(text)
+                approval_summary = self._approval_summary(run)
 
-            self._call_tool(
-                transport,
-                "cross_thread_delivery_ack",
-                {"run_id": run_id},
-            )
-            if not result_session_id or not lock_token:
-                raise McpControllerClientError(
-                    "controller start result did not include session_id and lock_token"
-                )
-            close_error = None
-            try:
-                self._call_tool(transport, "cross_thread_close", {"run_id": run_id})
-            except Exception as exc:
-                close_error = exc
-            try:
                 self._call_tool(
                     transport,
-                    "cross_thread_release",
-                    {"session_id": result_session_id, "lock_token": lock_token},
+                    "cross_thread_delivery_ack",
+                    {"run_id": run_id},
+                )
+                delivered = True
+                if not result_session_id or not lock_token:
+                    raise McpControllerClientError(
+                        "controller start result did not include session_id and lock_token"
+                    )
+                self._close_and_release(
+                    transport,
+                    run_id,
+                    result_session_id,
+                    lock_token,
                 )
             except Exception:
-                if close_error is not None:
-                    raise close_error
+                if not delivered:
+                    self._cleanup_started_run(
+                        transport,
+                        run_id,
+                        result_session_id,
+                        lock_token,
+                    )
                 raise
-            if close_error is not None:
-                raise close_error
 
             return ControllerRunResult(
                 run_id=run_id,
@@ -419,6 +426,61 @@ class McpControllerClient:
             )
         finally:
             transport.close()
+
+    def _close_and_release(
+        self,
+        transport: _JsonRpcTransport,
+        run_id: str,
+        session_id: str,
+        lock_token: str,
+    ) -> None:
+        close_error = None
+        try:
+            self._call_tool(transport, "cross_thread_close", {"run_id": run_id})
+        except Exception as exc:
+            close_error = exc
+        try:
+            self._call_tool(
+                transport,
+                "cross_thread_release",
+                {"session_id": session_id, "lock_token": lock_token},
+            )
+        except Exception:
+            if close_error is not None:
+                raise close_error
+            raise
+        if close_error is not None:
+            raise close_error
+
+    def _cleanup_started_run(
+        self,
+        transport: _JsonRpcTransport,
+        run_id: Optional[str],
+        session_id: Optional[str],
+        lock_token: Optional[str],
+    ) -> None:
+        if not run_id:
+            return
+        cleanup_steps = [
+            (
+                "cross_thread_cancel",
+                {"run_id": run_id, "reason": "client cleanup after failure"},
+            ),
+            ("cross_thread_delivery_ack", {"run_id": run_id}),
+            ("cross_thread_close", {"run_id": run_id}),
+        ]
+        if session_id and lock_token:
+            cleanup_steps.append(
+                (
+                    "cross_thread_release",
+                    {"session_id": session_id, "lock_token": lock_token},
+                )
+            )
+        for name, arguments in cleanup_steps:
+            try:
+                self._call_tool(transport, name, arguments)
+            except Exception:
+                continue
 
     def _open_transport(self) -> _JsonRpcTransport:
         if self._transport_factory is not None:
@@ -481,7 +543,7 @@ class McpControllerClient:
             locked = bool(session)
         else:
             locked = lock_status != "released"
-        return {
+        status = {
             "session_id": self._first_str(session.get("session_id"), session_id),
             "locked": locked,
             "dirty": bool(session.get("dirty", False)),
@@ -492,6 +554,11 @@ class McpControllerClient:
             "status": lock_status,
             "controller_status": controller_status,
         }
+        for key in ("cwd", "workspace_root", "project_root", "default_cwd"):
+            value = self._first_str(session.get(key), controller_status.get(key))
+            if value:
+                status[key] = value
+        return status
 
     def _run_id(self, result: dict) -> str:
         run = self._run(result)

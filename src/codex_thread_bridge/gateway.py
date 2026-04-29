@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import time
 from typing import Optional
@@ -205,7 +206,9 @@ class Gateway:
         session_id: str,
     ) -> OutgoingMessage:
         status = self.controller.status(session_id)
-        cwd = self._workspace_from_status(status)
+        cwd = self._workspace_from_status(status) or self._workspace_from_session_meta(
+            session_id
+        )
         if cwd is None:
             return OutgoingMessage(
                 msg.conversation_id,
@@ -612,6 +615,34 @@ class Gateway:
                 return str(value)
         return None
 
+    def _workspace_from_session_meta(self, session_id: str) -> Optional[str]:
+        history_path = self._session_history_path(session_id)
+        if history_path is None:
+            return None
+        try:
+            with history_path.open(encoding="utf-8") as handle:
+                for _index in range(50):
+                    line = handle.readline()
+                    if not line:
+                        return None
+                    try:
+                        payload = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    if payload.get("type") != "session_meta":
+                        continue
+                    meta = payload.get("payload")
+                    if not isinstance(meta, dict):
+                        continue
+                    cwd = meta.get("cwd")
+                    if isinstance(cwd, str) and cwd.strip():
+                        return cwd
+        except OSError:
+            return None
+        return None
+
     def _session_history_path(self, session_id: str) -> Optional[Path]:
         local_path = self.config.data_dir / "sessions" / ("%s.jsonl" % session_id)
         if local_path.exists():
@@ -621,7 +652,12 @@ class Gateway:
         if not codex_sessions.exists():
             return None
 
-        matches = list(codex_sessions.glob("**/*%s.jsonl" % session_id))
+        matches = [
+            path
+            for path in codex_sessions.glob("**/*.jsonl")
+            if path.name == "%s.jsonl" % session_id
+            or path.name.endswith("-%s.jsonl" % session_id)
+        ]
         if not matches:
             return None
         return max(matches, key=lambda path: path.stat().st_mtime)

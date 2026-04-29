@@ -104,6 +104,34 @@ def test_list_aliases_remove_alias_and_refresh_offset(bridge_config) -> None:
     assert [alias.alias for alias in store.list_aliases()] == ["a"]
 
 
+def test_rebinding_alias_to_new_session_resets_refresh_offset(
+    bridge_config,
+) -> None:
+    store = BridgeStore(bridge_config.sqlite_path)
+    store.initialize()
+
+    store.upsert_alias(
+        alias="code",
+        session_id="session-old",
+        label="Code",
+        default_cwd="/tmp/code-old",
+        policy=ExecutionPolicy.work_default("/tmp/code-old"),
+        created_by="owner-1",
+    )
+    store.set_refresh_offset("code", 12)
+
+    store.upsert_alias(
+        alias="code",
+        session_id="session-new",
+        label="Code",
+        default_cwd="/tmp/code-new",
+        policy=ExecutionPolicy.work_default("/tmp/code-new"),
+        created_by="owner-1",
+    )
+
+    assert store.get_refresh_offset("code") == 0
+
+
 def test_remove_alias_clears_context_pointers(bridge_config) -> None:
     store = BridgeStore(bridge_config.sqlite_path)
     store.initialize()
@@ -265,3 +293,30 @@ def test_rebinding_or_removing_alias_clears_latest_artifact_run(bridge_config) -
 
     assert store.remove_alias("code") is True
     assert store.get_latest_artifact_run("code") is None
+
+
+def test_remove_alias_deletes_artifact_rows(bridge_config) -> None:
+    store = BridgeStore(bridge_config.sqlite_path)
+    store.initialize()
+    store.upsert_alias(
+        alias="code",
+        session_id="session-1",
+        label="Code",
+        default_cwd="/tmp/code",
+        policy=ExecutionPolicy.work_default("/tmp/code"),
+        created_by="owner-1",
+    )
+    store.record_artifact(
+        run_id="run-1",
+        alias="code",
+        session_id="session-1",
+        local_path="/tmp/code/exports/report.md",
+        mime_type="text/markdown",
+        size_bytes=12,
+        status="allowed",
+        reason="ok",
+    )
+
+    store.remove_alias("code")
+
+    assert store.list_artifacts("code") == []

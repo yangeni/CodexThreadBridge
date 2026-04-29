@@ -231,6 +231,34 @@ def test_private_use_unknown_alias_is_rejected(tmp_path: Path) -> None:
     assert "Unknown alias" in reply.text
 
 
+def test_private_add_reads_workspace_from_local_session_meta_when_status_lacks_it(
+    tmp_path: Path,
+) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    session_path = _config.data_dir / "sessions" / "019-code.jsonl"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": "019-code",
+                    "cwd": "/tmp/codex-target/from-session-meta",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    reply = gateway.handle(private_msg("/add code 019-code"))
+    alias = store.get_alias("code")
+
+    assert "Added alias code -> 019-code" in reply.text
+    assert alias is not None
+    assert alias.default_cwd == "/tmp/codex-target/from-session-meta"
+
+
 def test_private_add_fails_closed_without_workspace_metadata(tmp_path: Path) -> None:
     gateway, _config, store, controller = _gateway_for(tmp_path)
     controller.status_by_session["019-code"] = _ready_status(cwd=None)
@@ -532,6 +560,23 @@ def test_private_refresh_without_active_alias_is_clear(tmp_path: Path) -> None:
 
     assert "No active thread" in reply.text
     assert controller.starts == []
+
+
+def test_refresh_history_lookup_uses_exact_session_id_suffix(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    gateway, _config, _store, _controller = _gateway_for(tmp_path)
+    home = tmp_path / "home"
+    sessions = home / ".codex" / "sessions" / "2026" / "04" / "28"
+    sessions.mkdir(parents=True)
+    wrong = sessions / "rollout-2026-04-28T00-00-00-prefixabc.jsonl"
+    right = sessions / "rollout-2026-04-28T00-00-01-abc.jsonl"
+    wrong.write_text("wrong\n", encoding="utf-8")
+    right.write_text("right\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+
+    assert gateway._session_history_path("abc") == right
 
 
 def test_private_status_uses_active_alias_without_dispatch(tmp_path: Path) -> None:
@@ -954,3 +999,31 @@ def test_private_artifacts_and_sendfile_ignore_old_session_after_alias_rebind(
 
     assert new_path in artifacts_after_new.text
     assert old_path not in artifacts_after_new.text
+
+
+def test_private_remove_alias_forgets_old_artifacts_after_readd_same_session(
+    tmp_path: Path,
+) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    controller.status_by_session["019-code"] = _ready_status(
+        cwd="/tmp/codex-target/code"
+    )
+    store.record_artifact(
+        run_id="run-old",
+        alias="code",
+        session_id="019-code",
+        local_path="/tmp/codex-target/code/old.txt",
+        mime_type="text/plain",
+        size_bytes=10,
+        status="allowed",
+        reason="ok",
+    )
+
+    gateway.handle(private_msg("/add code 019-code"))
+    gateway.handle(private_msg("/use code"))
+    gateway.handle(private_msg("/remove code"))
+    gateway.handle(private_msg("/add code 019-code"))
+    gateway.handle(private_msg("/use code"))
+    reply = gateway.handle(private_msg("/artifacts"))
+
+    assert reply.text == "No artifacts."

@@ -153,6 +153,14 @@ class BridgeStore:
                     "DELETE FROM artifact_runs WHERE alias = ?",
                     (alias,),
                 )
+                connection.execute(
+                    "DELETE FROM artifacts WHERE alias = ?",
+                    (alias,),
+                )
+                connection.execute(
+                    "UPDATE thread_aliases SET refresh_offset = 0 WHERE alias = ?",
+                    (alias,),
+                )
 
     def get_alias(self, alias: str) -> Optional[ThreadAlias]:
         with self._connect() as connection:
@@ -184,6 +192,10 @@ class BridgeStore:
                 )
                 connection.execute(
                     "DELETE FROM artifact_runs WHERE alias = ?",
+                    (alias,),
+                )
+                connection.execute(
+                    "DELETE FROM artifacts WHERE alias = ?",
                     (alias,),
                 )
         return cursor.rowcount > 0
