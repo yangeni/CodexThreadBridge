@@ -395,6 +395,65 @@ def test_start_or_send_cleans_up_after_malformed_start_missing_lock_token() -> N
     ]
 
 
+def test_start_or_send_reads_lock_token_from_session_when_top_level_missing() -> None:
+    transport = FakeTransport(
+        [
+            {"capabilities": {"tools": {}}},
+            tool_result(
+                {
+                    "run_id": "run-1",
+                    "session_id": "019-code",
+                    "session_head": "head-start",
+                    "last_event_seq": 7,
+                    "run": {"run_id": "run-1", "session_id": "019-code"},
+                    "session": {
+                        "session_id": "019-code",
+                        "lock_token": "lock-from-session",
+                        "status": "active",
+                    },
+                }
+            ),
+            tool_result(
+                {
+                    "status": "ready",
+                    "runs": [{"run_id": "run-1", "status": "completed"}],
+                }
+            ),
+            tool_result(
+                {
+                    "run": {
+                        "run_id": "run-1",
+                        "session_id": "019-code",
+                        "status": "completed",
+                        "actual_session_head": "head-2",
+                    },
+                    "result_text": "done",
+                }
+            ),
+            tool_result({"run": {"run_id": "run-1", "status": "completed"}}),
+            tool_result({"run": {"run_id": "run-1", "closed_at": 1.0}}),
+            tool_result({"session": {"session_id": "019-code", "status": "released"}}),
+        ]
+    )
+    client = McpControllerClient(["fake-mcp"], transport_factory=lambda: transport)
+
+    result = client.start_or_send(
+        session_id="019-code",
+        cwd="/tmp/project",
+        message="hello",
+        owner="ctb-private:owner-1",
+        policy=ExecutionPolicy.work_default("/tmp/project"),
+        idempotency_key="m-1:code",
+        expected_session_head="head-1",
+    )
+
+    assert result.text == "done"
+    assert transport.requests[-1][1]["arguments"] == {
+        "session_id": "019-code",
+        "lock_token": "lock-from-session",
+    }
+
+
 def test_start_or_send_cleans_up_after_malformed_start_missing_new_session_id() -> None:
     transport = FakeTransport(
         [

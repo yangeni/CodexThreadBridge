@@ -583,7 +583,15 @@ class McpControllerClient:
         return session_id
 
     def _lock_token(self, result: dict) -> str:
-        lock_token = self._first_str(result.get("lock_token"))
+        run = self._run(result)
+        session = result.get("session")
+        if not isinstance(session, dict):
+            session = {}
+        lock_token = self._first_str(
+            result.get("lock_token"),
+            session.get("lock_token"),
+            run.get("lock_token"),
+        )
         if not lock_token:
             raise McpControllerClientError("controller start result missing lock_token")
         return lock_token
