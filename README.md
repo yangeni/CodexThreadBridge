@@ -82,8 +82,8 @@ CodexThreadBridge/
   session IDs.
 - Default mode: after `/use <alias>`, ordinary owner private-chat messages go
   directly to the target Codex session through the controller boundary.
-- Group mode: owner-approved WeChat groups get isolated read-only QA sessions,
-  not write-capable work aliases.
+- Group mode: Gateway Core has isolated read-only QA capability, but the
+  current v0.3 OpeniLink runtime does not expose it.
 - Result mode: return the completed response as one message.
 - Artifact mode: detected local files are listed after safety checks. `/sendfile`
   is owner-private only and currently returns would-send results; real channel
@@ -97,13 +97,16 @@ CodexThreadBridge/
   manual changes are pulled with `/refresh`.
 - No group work dispatch. Groups cannot dispatch work aliases, approve actions,
   reset themselves, or receive local files.
-- No unbounded execution authority. Private work aliases use the existing
-  Codex session workspace with `approval_policy=on-request`; group QA is
-  read-only with approvals disabled.
+- No group QA runtime in v0.3 OpeniLink. Group messages are ignored, and
+  private `/group ...` commands are blocked by the runtime.
+- No unbounded execution authority. Private work aliases use the existing Codex
+  session workspace with `approval_policy=on-request`; Gateway Core group QA
+  remains read-only with approvals disabled and is not exposed by v0.3
+  OpeniLink runtime.
 - No direct dependency on `cross-thread-controller` internals. The gateway should
   treat the controller as an MCP server boundary.
 
-## Current Command Shape
+## Current v0.3 OpeniLink Runtime Commands
 
 ```text
 /add <alias> <session_id>       Add an owner private-chat alias.
@@ -113,13 +116,11 @@ CodexThreadBridge/
 /refresh [alias]                Read local history without a model turn.
 /artifacts [alias]              List latest detected artifacts.
 /sendfile <artifact_id|all>     Return owner-private would-send results for allowed artifacts.
-/group approve <group> [alias]  Owner-only approval for isolated group QA.
-/group list                     Owner-only group listing.
-/group status <group|alias>     Owner-only group status.
-/group reset <group|alias>      Owner-only reset to pending.
-/group disable <group|alias>    Owner-only disable.
-@Bot /qa status                 Group-side QA status check.
 ```
+
+Gateway Core retains `/group approve|list|status|reset|disable` and group-side
+QA handling for future adapter work. Those commands are not exposed by the
+current v0.3 OpeniLink runtime.
 
 ## Source Dependency
 
