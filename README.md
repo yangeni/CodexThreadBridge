@@ -3,24 +3,33 @@
 CodexThreadBridge is a local gateway project for connecting mobile chat
 surfaces to long-lived Codex history threads.
 
-The v0.2 slice is a WeChat-first mobile Agent console. It keeps platform
-protocol details behind channel adapters, routes normalized chat events through
-Gateway Core, and uses the `cross-thread-controller` boundary to continue
-existing Codex sessions.
+The v0.3 slice is a WeChat-first mobile Agent console with a real private-chat
+text runtime. It keeps platform protocol details behind channel adapters, routes
+normalized chat events through Gateway Core, and uses the
+`cross-thread-controller` boundary to continue existing Codex sessions.
 
 ## Current Status
 
-v0.2 is implemented as a local Python package with a simulator, SQLite-backed
-state, Gateway Core policy checks, a controller client boundary, and an
-OpeniLink-compatible WeChat adapter boundary.
+v0.3 is implemented as a local Python package with a simulator, SQLite-backed
+state, Gateway Core policy checks, a controller client boundary, an
+OpeniLink-compatible WeChat adapter boundary, and a real iLink/OpenClaw-WeChat
+private-chat text runtime.
+
+v0.3 adds the first real iLink/OpenClaw-WeChat private-chat runtime. It keeps
+the v0.2 Gateway Core policy boundary and wires real text updates through an
+iLink-compatible HTTP client. Media upload, group runtime activation, Windows
+packaging, and launchd autostart remain outside v0.3.
 
 The current runtime behavior is:
 
-- WeChat is the first mobile console target for v0.2.
+- WeChat is the first mobile console target.
+- v0.3 can long-poll iLink/OpenClaw-WeChat-style private text updates and send
+  text replies through `sendmessage`.
 - Owner private chat can dispatch work to existing Codex aliases with
   `/add <alias> <session_id>` and `/use <alias>`.
-- Approved WeChat groups use isolated QA sessions with read-only policy and
-  `approval_policy=never`.
+- Gateway Core still has the approved group QA path with read-only policy and
+  `approval_policy=never`, but the v0.3 real OpeniLink runtime does not
+  activate group chat.
 - Status/refresh/list do not create model turns; alias listing/status commands
   are read-only Gateway/controller operations.
 - Artifacts are only eligible for owner-private delivery after local path, root,
@@ -33,15 +42,18 @@ The current runtime behavior is:
 ```text
 CodexThreadBridge/
 ├── README.md
+├── .env.example
 ├── setup.py
 ├── setup.cfg
 ├── pytest.ini
 ├── docs/
 │   ├── 00_设计草稿.md
 │   ├── 01_MVP实施方案.md
-│   └── 02_v0.2运行说明.md
+│   ├── 02_v0.2运行说明.md
+│   └── 03_v0.3_OpeniLink运行说明.md
 ├── src/
 │   └── codex_thread_bridge/
+│       ├── config.py
 │       ├── gateway.py
 │       ├── controller_client.py
 │       ├── stores.py
@@ -49,8 +61,11 @@ CodexThreadBridge/
 │       ├── artifacts.py
 │       └── adapters/
 │           ├── local.py
+│           ├── ilink_client.py
+│           ├── ilink_events.py
 │           ├── wechat_channel.py
-│           └── openilink.py
+│           ├── openilink.py
+│           └── openilink_runtime.py
 ├── tests/
 └── data/
     └── attachments/
