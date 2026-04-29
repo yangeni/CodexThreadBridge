@@ -43,6 +43,19 @@ def test_openilink_runtime_config_masks_secret_in_repr(
     assert "bot_token='***'" in text
 
 
+def test_openilink_runtime_config_accepts_positive_timeout_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_required_openilink_env(tmp_path, monkeypatch)
+    monkeypatch.setenv("ILINK_POLL_TIMEOUT_SECONDS", "0.5")
+    monkeypatch.setenv("ILINK_REQUEST_TIMEOUT_SECONDS", "12.75")
+
+    config = OpeniLinkRuntimeConfig.from_env()
+
+    assert config.poll_timeout_seconds == 0.5
+    assert config.request_timeout_seconds == 12.75
+
+
 @pytest.mark.parametrize(
     "missing",
     ["CTB_PROJECT_ROOT", "ILINK_BASE_URL", "ILINK_BOT_TOKEN", "ILINK_OWNER_USER_IDS"],
