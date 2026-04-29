@@ -514,3 +514,149 @@ def test_run_forever_records_runtime_error_and_continues_to_next_batch(tmp_path)
     assert len(events) == 1
     payload = json.loads(str(events[0]["payload_json"]))
     assert payload == {"reason": "temporary outage [redacted]"}
+
+
+def test_runtime_smoke_add_use_and_dispatch_with_fake_controller(tmp_path) -> None:
+    from codex_thread_bridge.config import BridgeConfig
+    from codex_thread_bridge.controller_client import ControllerRunResult
+    from codex_thread_bridge.gateway import Gateway
+    from codex_thread_bridge.models import ExecutionPolicy
+
+    config = BridgeConfig.local_dev(tmp_path, {"owner-1"})
+    store = BridgeStore(config.sqlite_path)
+    store.initialize()
+
+    class RuntimeSmokeController:
+        def __init__(self) -> None:
+            self.starts: list[dict[str, object]] = []
+
+        def status(self, session_id: str) -> dict:
+            return {
+                "session_id": session_id,
+                "locked": False,
+                "dirty": False,
+                "reconcile_required": False,
+                "session_head": "head-1",
+                "cwd": str(tmp_path / "work"),
+            }
+
+        def start_or_send(
+            self,
+            *,
+            session_id: Optional[str],
+            cwd: str,
+            message: str,
+            owner: str,
+            policy: ExecutionPolicy,
+            idempotency_key: str,
+            expected_session_head: Optional[str],
+        ) -> ControllerRunResult:
+            self.starts.append(
+                {
+                    "session_id": session_id,
+                    "cwd": cwd,
+                    "message": message,
+                    "owner": owner,
+                    "policy": policy,
+                    "idempotency_key": idempotency_key,
+                    "expected_session_head": expected_session_head,
+                }
+            )
+            return ControllerRunResult(
+                run_id="run-1",
+                session_id=session_id or "created-session",
+                session_head="head-2",
+                status="completed",
+                text="done",
+                approval_summary=None,
+            )
+
+    controller = RuntimeSmokeController()
+    gateway = Gateway(config, store, controller)
+    batches = [
+        {
+            "ret": 0,
+            "get_updates_buf": "cursor-1",
+            "msgs": [
+                {
+                    "message_id": 1,
+                    "from_user_id": "owner-1",
+                    "to_user_id": "bot-1",
+                    "message_state": 2,
+                    "context_token": "ctx-1",
+                    "item_list": [
+                        {
+                            "type": 1,
+                            "text_item": {"text": "/add code 019-code"},
+                        }
+                    ],
+                }
+            ],
+        },
+        {
+            "ret": 0,
+            "get_updates_buf": "cursor-2",
+            "msgs": [
+                {
+                    "message_id": 2,
+                    "from_user_id": "owner-1",
+                    "to_user_id": "bot-1",
+                    "message_state": 2,
+                    "context_token": "ctx-2",
+                    "item_list": [
+                        {
+                            "type": 1,
+                            "text_item": {"text": "/use code"},
+                        }
+                    ],
+                }
+            ],
+        },
+        {
+            "ret": 0,
+            "get_updates_buf": "cursor-3",
+            "msgs": [
+                {
+                    "message_id": 3,
+                    "from_user_id": "owner-1",
+                    "to_user_id": "bot-1",
+                    "message_state": 2,
+                    "context_token": "ctx-3",
+                    "item_list": [
+                        {
+                            "type": 1,
+                            "text_item": {"text": "please continue"},
+                        }
+                    ],
+                }
+            ],
+        },
+    ]
+
+    class BatchClient(FakeIlinkClient):
+        def get_updates(
+            self,
+            cursor: str,
+            timeout_seconds: Optional[float] = None,
+        ) -> dict:
+            return batches.pop(0)
+
+    client = BatchClient({})
+    runtime = OpeniLinkRuntime(
+        client=client,
+        gateway=gateway,
+        store=store,
+        owner_user_ids={"owner-1"},
+    )
+
+    runtime.process_one_batch()
+    runtime.process_one_batch()
+    runtime.process_one_batch()
+
+    assert [text for _conversation_id, text in client.sent] == [
+        "Added alias code -> 019-code",
+        "Using alias code",
+        "done",
+    ]
+    assert [start["message"] for start in controller.starts] == ["please continue"]
+    assert store.get_runtime_state("ilink.cursor") == "cursor-3"
