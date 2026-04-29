@@ -33,9 +33,9 @@ The current runtime behavior is:
 - Status/refresh/list do not create model turns; alias listing/status commands
   are read-only Gateway/controller operations.
 - Artifacts are only eligible for owner-private delivery after local path, root,
-  freshness, size, and sensitive-path checks; v0.2 currently returns
-  would-send results until real channel upload wiring is added.
-- Feishu and Windows remain adapter targets, not v0.2 deliverables.
+  freshness, size, and sensitive-path checks; `/sendfile` currently returns
+  owner-private would-send results until real channel upload wiring is added.
+- Feishu and Windows remain adapter targets after v0.3.
 
 ## Project Layout
 
