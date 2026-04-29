@@ -1,0 +1,9 @@
+{
+  "message_id": "wx-m-1",
+  "conversation_id": "owner-chat",
+  "conversation_type": "private",
+  "sender_id": "owner-1",
+  "text": "/list",
+  "mentions": [],
+  "attachments": []
+}

@@ -9,11 +9,12 @@ import pytest
 from codex_thread_bridge import __version__
 from codex_thread_bridge.config import BridgeConfig
 from codex_thread_bridge.models import (
+    AttachmentDescriptor,
     AttachmentRef,
-    OutgoingMessage,
-    ExecutionPolicy,
     ConversationType,
+    ExecutionPolicy,
     IncomingMessage,
+    OutgoingMessage,
     SenderRole,
 )
 
@@ -82,6 +83,22 @@ def test_attachment_ref_records_inbound_direction() -> None:
         direction="inbound",
     )
 
+    assert attachment.direction == "inbound"
+
+
+def test_attachment_descriptor_copies_descriptor_payload() -> None:
+    descriptor = {"id": "att-1"}
+    attachment = AttachmentDescriptor(
+        source_message_id="msg-1",
+        descriptor=descriptor,
+        mime_type="image/png",
+        original_name="image.png",
+    )
+
+    descriptor["id"] = "mutated"
+
+    assert dict(attachment.descriptor) == {"id": "att-1"}
+    assert isinstance(attachment.descriptor, dict)
     assert attachment.direction == "inbound"
 
 

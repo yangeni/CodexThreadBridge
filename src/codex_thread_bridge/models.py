@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Any, Dict, Literal, Optional, Union
 
 
 class ConversationType(str, Enum):
@@ -33,6 +33,21 @@ class AttachmentRef:
 
 
 @dataclass(frozen=True)
+class AttachmentDescriptor:
+    source_message_id: str
+    descriptor: Dict[str, Any]
+    mime_type: str
+    original_name: str
+    direction: Literal["inbound"] = "inbound"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "descriptor", dict(self.descriptor))
+
+
+IncomingAttachment = Union[AttachmentRef, AttachmentDescriptor]
+
+
+@dataclass(frozen=True)
 class IncomingMessage:
     platform: str
     conversation_type: ConversationType
@@ -41,7 +56,7 @@ class IncomingMessage:
     sender_id: str
     sender_role: SenderRole
     text: str
-    attachments: tuple[AttachmentRef, ...]
+    attachments: tuple[IncomingAttachment, ...]
     raw_ref: Any
 
     def __post_init__(self) -> None:
