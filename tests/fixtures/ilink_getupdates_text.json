@@ -1,0 +1,24 @@
+{
+  "ret": 0,
+  "get_updates_buf": "cursor-2",
+  "msgs": [
+    {
+      "seq": 10,
+      "message_id": 12345,
+      "from_user_id": "owner-1",
+      "to_user_id": "bot-1",
+      "session_id": "session-owner-1",
+      "message_type": 1,
+      "message_state": 2,
+      "context_token": "ctx-owner-1",
+      "item_list": [
+        {
+          "type": 1,
+          "text_item": {
+            "text": "/list"
+          }
+        }
+      ]
+    }
+  ]
+}

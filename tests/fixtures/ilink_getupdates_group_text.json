@@ -1,0 +1,25 @@
+{
+  "ret": 0,
+  "get_updates_buf": "cursor-3",
+  "msgs": [
+    {
+      "seq": 11,
+      "message_id": 12346,
+      "from_user_id": "member-1",
+      "to_user_id": "group-1",
+      "session_id": "session-group-1",
+      "message_type": 1,
+      "message_state": 2,
+      "context_token": "ctx-group-1",
+      "conversation_type": "group",
+      "item_list": [
+        {
+          "type": 1,
+          "text_item": {
+            "text": "@Bot status?"
+          }
+        }
+      ]
+    }
+  ]
+}
