@@ -21,6 +21,9 @@ class RuntimeBatchResult:
     cursor: str
 
 
+_GROUP_MANAGEMENT_DISABLED_REPLY = "Group QA runtime is not enabled in v0.3."
+
+
 class OpeniLinkRuntime:
     def __init__(
         self,
@@ -71,10 +74,13 @@ class OpeniLinkRuntime:
             reply_text = self.store.get_runtime_state(outbox_key)
             reply_conversation_id = event.context.conversation_id
             if reply_text is None:
-                msg = normalize_openilink_event(event.payload, self.owner_user_ids)
-                reply = self.gateway.handle(msg)
-                reply_text = reply.text
-                reply_conversation_id = reply.conversation_id
+                if _is_group_management_command(str(event.payload.get("text", ""))):
+                    reply_text = _GROUP_MANAGEMENT_DISABLED_REPLY
+                else:
+                    msg = normalize_openilink_event(event.payload, self.owner_user_ids)
+                    reply = self.gateway.handle(msg)
+                    reply_text = reply.text
+                    reply_conversation_id = reply.conversation_id
                 if reply_text:
                     self.store.set_runtime_state(outbox_key, reply_text)
 
@@ -189,6 +195,13 @@ def _sanitize_error(exc: Exception, redacted_values: Iterable[str]) -> str:
     for value in redacted_values:
         text = text.replace(value, "[redacted]")
     return text[:300]
+
+
+def _is_group_management_command(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return stripped.split(None, 1)[0].lower() == "/group"
 
 
 def _processed_message_key(message_id: str) -> str:

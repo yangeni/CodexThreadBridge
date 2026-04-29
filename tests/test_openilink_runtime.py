@@ -281,6 +281,91 @@ def test_group_message_is_ignored_by_v03_runtime_without_calling_gateway(tmp_pat
     assert payload["conversation_id"] == "group-1"
 
 
+def test_private_group_management_command_is_rejected_before_gateway(tmp_path) -> None:
+    @dataclass
+    class FailingGateway:
+        called: bool = False
+
+        def handle(self, msg):
+            self.called = True
+            raise AssertionError("gateway should not handle group management")
+
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    store.initialize()
+    client = FakeIlinkClient(_batch(_private_message("/group approve group-1")))
+    gateway = FailingGateway()
+    runtime = OpeniLinkRuntime(
+        client=client,
+        gateway=gateway,
+        store=store,
+        owner_user_ids={"owner-1"},
+    )
+
+    result = runtime.process_one_batch()
+
+    assert result.messages_seen == 1
+    assert result.replies_sent == 1
+    assert gateway.called is False
+    assert client.sent == [
+        ("owner-1", "Group QA runtime is not enabled in v0.3.")
+    ]
+    assert store.get_runtime_state("ilink.cursor") == "cursor-2"
+    assert store.get_runtime_state("ilink.processed.12345") == "1"
+
+
+def test_failed_group_management_rejection_replays_without_gateway(tmp_path) -> None:
+    class FailsOnceClient(FakeIlinkClient):
+        def __init__(self, batch: dict) -> None:
+            super().__init__(batch)
+            self.should_fail = True
+
+        def send_text(self, *, conversation_id: str, text: str) -> None:
+            if self.should_fail:
+                self.should_fail = False
+                raise RuntimeError("network timeout")
+            self.sent.append((conversation_id, text))
+
+    @dataclass
+    class FailingGateway:
+        called: bool = False
+
+        def handle(self, msg):
+            self.called = True
+            raise AssertionError("gateway should not handle group management")
+
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    store.initialize()
+    client = FailsOnceClient(_batch(_private_message("/group approve group-1")))
+    gateway = FailingGateway()
+    runtime = OpeniLinkRuntime(
+        client=client,
+        gateway=gateway,
+        store=store,
+        owner_user_ids={"owner-1"},
+    )
+
+    first_result = runtime.process_one_batch()
+
+    assert first_result.replies_sent == 0
+    assert gateway.called is False
+    assert store.get_runtime_state("ilink.cursor") is None
+    assert (
+        store.get_runtime_state("ilink.outbox.12345")
+        == "Group QA runtime is not enabled in v0.3."
+    )
+    assert store.get_runtime_state("ilink.processed.12345") is None
+
+    second_result = runtime.process_one_batch()
+
+    assert second_result.replies_sent == 1
+    assert gateway.called is False
+    assert client.sent == [
+        ("owner-1", "Group QA runtime is not enabled in v0.3.")
+    ]
+    assert store.get_runtime_state("ilink.cursor") == "cursor-2"
+    assert store.get_runtime_state("ilink.processed.12345") == "1"
+
+
 def test_malformed_message_records_event_and_later_valid_message_still_advances_cursor(tmp_path) -> None:
     malformed = _private_message()
     del malformed["from_user_id"]
