@@ -16,7 +16,7 @@ OpeniLink-compatible WeChat adapter boundary, and a real iLink/OpenClaw-WeChat
 private-chat text runtime.
 
 v0.3 adds the first real iLink/OpenClaw-WeChat private-chat runtime. It keeps
-the v0.2 Gateway Core policy boundary and wires real text updates through an
+the Gateway Core policy boundary and wires real text updates through an
 iLink-compatible HTTP client. Media upload, group runtime activation, Windows
 packaging, and launchd autostart remain outside v0.3.
 
@@ -72,11 +72,12 @@ CodexThreadBridge/
         └── .gitignore
 ```
 
-## v0.2 Scope
+## v0.3 Scope
 
 - Runtime: local Python service on this Mac.
 - Controller integration: MCP stdio calls to `cross-thread-controller`.
-- First adapters: local simulator and OpeniLink-compatible WeChat boundary.
+- Adapters: local simulator, OpeniLink-compatible WeChat boundary, and real
+  private-chat text runtime.
 - Binding model: owner private chat maps short aliases to existing Codex
   session IDs.
 - Default mode: after `/use <alias>`, ordinary owner private-chat messages go
@@ -92,8 +93,8 @@ CodexThreadBridge/
 
 - No model heartbeat. Background sync may read local state or Codex JSONL files,
   but must not send turns such as "are you still there?" or "report status".
-- No automatic realtime sync in v0.2. Mobile-initiated runs return results; Codex
-  App manual changes are pulled with `/refresh`.
+- No automatic realtime sync. Mobile-initiated runs return results; Codex App
+  manual changes are pulled with `/refresh`.
 - No group work dispatch. Groups cannot dispatch work aliases, approve actions,
   reset themselves, or receive local files.
 - No unbounded execution authority. Private work aliases use the existing
