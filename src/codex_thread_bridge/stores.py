@@ -82,6 +82,12 @@ class BridgeStore:
                     updated_at INTEGER NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS runtime_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_type TEXT NOT NULL,
@@ -308,6 +314,55 @@ class BridgeStore:
                 "UPDATE thread_aliases SET refresh_offset = ?, updated_at = ? WHERE alias = ?",
                 (line_number, self._now(), alias),
             )
+
+    def set_runtime_state(self, key: str, value: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO runtime_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value=excluded.value,
+                    updated_at=excluded.updated_at
+                """,
+                (key, value, self._now()),
+            )
+
+    def get_runtime_state(self, key: str) -> Optional[str]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM runtime_state WHERE key = ?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["value"])
+
+    def record_event(self, event_type: str, payload: Dict[str, object]) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO events (event_type, payload_json, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (event_type, json.dumps(payload, ensure_ascii=True), self._now()),
+            )
+        return int(cursor.lastrowid)
+
+    def list_events(
+        self, event_type: Optional[str] = None
+    ) -> List[Dict[str, object]]:
+        with self._connect() as connection:
+            if event_type is None:
+                rows = connection.execute(
+                    "SELECT id, event_type, payload_json FROM events ORDER BY id ASC"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT id, event_type, payload_json FROM events WHERE event_type = ? ORDER BY id ASC",
+                    (event_type,),
+                ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
 
     def record_artifact(
         self,
