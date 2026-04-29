@@ -87,14 +87,14 @@ from codex_thread_bridge.config import OpeniLinkRuntimeConfig
 def test_openilink_runtime_config_loads_required_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CTB_PROJECT_ROOT", str(tmp_path))
     monkeypatch.setenv("ILINK_BASE_URL", "https://ilink.example.test/bot/")
-    monkeypatch.setenv("ILINK_BOT_TOKEN", "secret-token")
+    monkeypatch.setenv("ILINK_BOT_TOKEN", "redacted-token-sample")
     monkeypatch.setenv("ILINK_OWNER_USER_IDS", "owner-1, owner-2")
 
     config = OpeniLinkRuntimeConfig.from_env()
 
     assert config.bridge.project_root == tmp_path
     assert config.base_url == "https://ilink.example.test/bot"
-    assert config.bot_token == "secret-token"
+    assert config.bot_token == "redacted-token-sample"
     assert config.owner_user_ids == frozenset({"owner-1", "owner-2"})
     assert config.poll_timeout_seconds == 35.0
     assert config.request_timeout_seconds == 30.0
@@ -104,12 +104,12 @@ def test_openilink_runtime_config_loads_required_env(tmp_path: Path, monkeypatch
 def test_openilink_runtime_config_masks_secret_in_repr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CTB_PROJECT_ROOT", str(tmp_path))
     monkeypatch.setenv("ILINK_BASE_URL", "https://ilink.example.test/bot")
-    monkeypatch.setenv("ILINK_BOT_TOKEN", "secret-token")
+    monkeypatch.setenv("ILINK_BOT_TOKEN", "redacted-token-sample")
     monkeypatch.setenv("ILINK_OWNER_USER_IDS", "owner-1")
 
     text = repr(OpeniLinkRuntimeConfig.from_env())
 
-    assert "secret-token" not in text
+    assert "redacted-token-sample" not in text
     assert "bot_token='***'" in text
 
 
@@ -121,7 +121,7 @@ def test_openilink_runtime_config_requires_channel_values(
 ) -> None:
     monkeypatch.setenv("CTB_PROJECT_ROOT", str(tmp_path))
     monkeypatch.setenv("ILINK_BASE_URL", "https://ilink.example.test/bot")
-    monkeypatch.setenv("ILINK_BOT_TOKEN", "secret-token")
+    monkeypatch.setenv("ILINK_BOT_TOKEN", "redacted-token-sample")
     monkeypatch.setenv("ILINK_OWNER_USER_IDS", "owner-1")
     monkeypatch.delenv(missing, raising=False)
 
@@ -330,7 +330,7 @@ def test_send_text_requires_remembered_context() -> None:
 def test_non_zero_ret_raises_sanitized_error() -> None:
     client = IlinkHttpClient(
         "https://ilink.example.test/bot",
-        "secret-token",
+        "redacted-token-sample",
         transport=RecordingTransport([{"ret": -14, "errmsg": "session timeout"}]),
     )
 
@@ -338,7 +338,7 @@ def test_non_zero_ret_raises_sanitized_error() -> None:
         client.get_updates("", timeout_seconds=1.0)
 
     assert "session timeout" in str(excinfo.value)
-    assert "secret-token" not in str(excinfo.value)
+    assert "redacted-token-sample" not in str(excinfo.value)
 ```
 
 - [ ] **Step 2: Run the client tests and verify failure**
@@ -1055,7 +1055,7 @@ def test_empty_gateway_reply_does_not_send_text_but_advances_cursor(tmp_path) ->
 def test_send_failure_records_event_and_does_not_advance_cursor(tmp_path) -> None:
     class FailingSendClient(FakeIlinkClient):
         def send_text(self, *, conversation_id: str, text: str) -> None:
-            raise RuntimeError("network timeout secret-token")
+            raise RuntimeError("network timeout redacted-token-sample")
 
     store = BridgeStore(tmp_path / "bridge.sqlite3")
     store.initialize()
@@ -1081,14 +1081,14 @@ def test_send_failure_records_event_and_does_not_advance_cursor(tmp_path) -> Non
         gateway=gateway,
         store=store,
         owner_user_ids={"owner-1"},
-        redacted_values={"secret-token"},
+        redacted_values={"redacted-token-sample"},
     )
 
     result = runtime.process_one_batch()
 
     assert result.replies_sent == 0
     assert store.get_runtime_state("ilink.cursor") is None
-    assert "secret-token" not in str(store.list_events("delivery_failed"))
+    assert "redacted-token-sample" not in str(store.list_events("delivery_failed"))
 
 
 def test_group_message_is_ignored_by_v03_runtime_without_calling_gateway(tmp_path) -> None:
@@ -1541,7 +1541,7 @@ packaging, and launchd autostart remain outside v0.3.
 Run:
 
 ```bash
-grep -R "ILINK_BOT_TOKEN=.*secret" -n README.md docs .env.example src tests
+grep -R -n "ILINK_BOT_TOKEN=.*sk-" README.md docs .env.example src tests
 python3 -m pytest -q
 ```
 
@@ -1564,10 +1564,10 @@ git commit -m "docs: add openilink runtime runbook"
 Run:
 
 ```bash
-grep -R "T[B]D\\|T[O]DO\\|FIX[M]E\\|secret-token" -n README.md docs/03_v0.3_OpeniLink运行说明.md docs/superpowers/specs src tests .env.example
+grep -R "T[B]D\\|T[O]DO\\|FIX[M]E" -n README.md docs/03_v0.3_OpeniLink运行说明.md docs/superpowers/specs src tests .env.example
 ```
 
-Expected: no placeholder-token matches; `secret-token` may appear only in tests that assert sanitization and never in docs or `.env.example`.
+Expected: no placeholder markers; runtime token placeholders in docs and `.env.example` must remain fake examples only. Sanitization token examples may appear only in tests.
 
 - [ ] **Step 2: Run full tests**
 
