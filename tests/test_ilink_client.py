@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import base64
 
 import pytest
 import urllib.request
@@ -49,10 +50,31 @@ def test_get_updates_posts_cursor_and_auth_headers() -> None:
     }
     url, body, headers, timeout = transport.requests[0]
     assert url == "https://ilink.example.test/bot/getupdates"
-    assert body == {"get_updates_buf": "cursor-1"}
+    assert body == {
+        "get_updates_buf": "cursor-1",
+        "base_info": {"channel_version": "2.1.7"},
+    }
     assert headers["Authorization"] == "Bearer secret"
     assert headers["AuthorizationType"] == "ilink_bot_token"
+    decoded_uin = base64.b64decode(headers["X-WECHAT-UIN"]).decode("utf-8")
+    assert decoded_uin.isdigit()
+    assert headers["iLink-App-Id"] == "bot"
+    assert headers["iLink-App-ClientVersion"] == "131335"
     assert timeout == 12.0
+
+
+def test_custom_wechat_uin_is_base64_encoded_in_headers() -> None:
+    transport = RecordingTransport([{"ret": 0, "msgs": [], "get_updates_buf": ""}])
+    client = IlinkHttpClient(
+        "https://ilink.example.test/bot",
+        "secret",
+        transport=transport,
+        wechat_uin="1234567890",
+    )
+
+    client.get_updates("", timeout_seconds=1.0)
+
+    assert transport.requests[0][2]["X-WECHAT-UIN"] == "MTIzNDU2Nzg5MA=="
 
 
 def test_get_updates_accepts_real_ilink_response_without_ret() -> None:
@@ -95,13 +117,19 @@ def test_send_text_uses_context_token_and_text_item() -> None:
     assert transport.requests[0][0] == "https://ilink.example.test/bot/sendmessage"
     assert transport.requests[0][1] == {
         "msg": {
+            "from_user_id": "",
             "to_user_id": "owner-1",
+            "client_id": transport.requests[0][1]["msg"]["client_id"],
+            "message_type": 2,
+            "message_state": 2,
             "context_token": "ctx-1",
             "item_list": [
                 {"type": 1, "text_item": {"text": "hello"}},
             ],
-        }
+        },
+        "base_info": {"channel_version": "2.1.7"},
     }
+    assert transport.requests[0][1]["msg"]["client_id"].startswith("ctb-")
 
 
 def test_send_text_accepts_real_ilink_response_without_ret() -> None:

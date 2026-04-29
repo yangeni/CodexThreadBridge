@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import random
 import socket
+import time
 import urllib.error
 import urllib.request
+import base64
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
@@ -40,6 +43,8 @@ class UrllibJsonTransport:
         timeout: float,
     ) -> dict:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        headers = dict(headers)
+        headers.setdefault("Content-Length", str(len(data)))
         request = urllib.request.Request(
             url,
             data=data,
@@ -76,11 +81,19 @@ class IlinkHttpClient:
         bot_token: str,
         transport: Optional[JsonTransport] = None,
         default_timeout_seconds: float = 30.0,
+        channel_version: str = "2.1.7",
+        app_client_version: int = 131335,
+        wechat_uin: Optional[str] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._bot_token = bot_token
         self._transport = transport or UrllibJsonTransport()
         self.default_timeout_seconds = float(default_timeout_seconds)
+        self._channel_version = channel_version
+        self._app_client_version = int(app_client_version)
+        self._wechat_uin = _encode_wechat_uin(
+            wechat_uin or str(random.randint(10**9, 10**10 - 1))
+        )
         self._contexts: dict[str, ConversationContext] = {}
 
     def get_updates(
@@ -90,7 +103,10 @@ class IlinkHttpClient:
     ) -> dict:
         response = self._post(
             "getupdates",
-            {"get_updates_buf": cursor},
+            {
+                "get_updates_buf": cursor,
+                "base_info": self._base_info(),
+            },
             timeout_seconds=timeout_seconds,
         )
         self._raise_for_ret(response, "getupdates")
@@ -122,12 +138,17 @@ class IlinkHttpClient:
             "sendmessage",
             {
                 "msg": {
+                    "from_user_id": "",
                     "to_user_id": context.to_user_id,
+                    "client_id": _message_client_id(),
+                    "message_type": 2,
+                    "message_state": 2,
                     "context_token": context.context_token,
                     "item_list": [
                         {"type": 1, "text_item": {"text": text}},
                     ],
-                }
+                },
+                "base_info": self._base_info(),
             },
         )
         self._raise_for_ret(response, "sendmessage")
@@ -158,7 +179,13 @@ class IlinkHttpClient:
             "Content-Type": "application/json",
             "AuthorizationType": "ilink_bot_token",
             "Authorization": "Bearer %s" % self._bot_token,
+            "iLink-App-Id": "bot",
+            "iLink-App-ClientVersion": str(self._app_client_version),
+            "X-WECHAT-UIN": self._wechat_uin,
         }
+
+    def _base_info(self) -> dict[str, str]:
+        return {"channel_version": self._channel_version}
 
     def _raise_for_ret(self, response: dict, operation: str) -> None:
         if "ret" not in response:
@@ -201,4 +228,15 @@ def _looks_like_getupdates_response(response: dict) -> bool:
         "msgs" in response
         or "get_updates_buf" in response
         or "sync_buf" in response
+    )
+
+
+def _encode_wechat_uin(value: str) -> str:
+    return base64.b64encode(value.encode("utf-8")).decode("ascii")
+
+
+def _message_client_id() -> str:
+    return "ctb-%d-%d" % (
+        int(time.time() * 1000),
+        random.randint(10**5, 10**6 - 1),
     )
