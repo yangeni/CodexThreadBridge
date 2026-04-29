@@ -22,6 +22,10 @@ class RuntimeBatchResult:
 
 
 _GROUP_MANAGEMENT_DISABLED_REPLY = "Group QA runtime is not enabled in v0.3."
+_DELIVERY_FAILED = "failed"
+_DELIVERY_SENT = "sent"
+_DELIVERY_SENDING = "sending"
+_DELIVERY_UNKNOWN = "unknown"
 
 
 class OpeniLinkRuntime:
@@ -57,6 +61,20 @@ class OpeniLinkRuntime:
             if self.store.get_runtime_state(_processed_message_key(message_id)):
                 continue
 
+            delivery_key = _delivery_message_key(message_id)
+            delivery_state = self.store.get_runtime_state(delivery_key)
+            if delivery_state == _DELIVERY_SENDING:
+                self.store.record_event(
+                    "delivery_unknown",
+                    {
+                        "conversation_id": event.context.conversation_id,
+                        "message_id": message_id,
+                    },
+                )
+                self._mark_message_processed(message_id)
+                self.store.set_runtime_state(delivery_key, _DELIVERY_UNKNOWN)
+                continue
+
             self.client.remember_context(
                 event.context.conversation_id,
                 to_user_id=event.context.to_user_id,
@@ -87,6 +105,7 @@ class OpeniLinkRuntime:
             if not reply_text:
                 self._mark_message_processed(message_id)
                 continue
+            self.store.set_runtime_state(delivery_key, _DELIVERY_SENDING)
             try:
                 self.client.send_text(
                     conversation_id=reply_conversation_id,
@@ -94,6 +113,7 @@ class OpeniLinkRuntime:
                 )
             except Exception as exc:
                 delivery_failed = True
+                self.store.set_runtime_state(delivery_key, _DELIVERY_FAILED)
                 self.store.record_event(
                     "delivery_failed",
                     {
@@ -103,6 +123,7 @@ class OpeniLinkRuntime:
                 )
                 break
             self._mark_message_processed(message_id)
+            self.store.set_runtime_state(delivery_key, _DELIVERY_SENT)
             replies_sent += 1
 
         new_cursor = str(batch.get("get_updates_buf") or cursor)
@@ -210,6 +231,10 @@ def _processed_message_key(message_id: str) -> str:
 
 def _outbox_message_key(message_id: str) -> str:
     return "ilink.outbox.%s" % message_id
+
+
+def _delivery_message_key(message_id: str) -> str:
+    return "ilink.delivery.%s" % message_id
 
 
 if __name__ == "__main__":

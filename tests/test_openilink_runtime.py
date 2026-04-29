@@ -89,6 +89,7 @@ def test_process_one_batch_handles_private_message_sends_reply_and_advances_curs
     assert client.contexts == [("owner-1", "owner-1", "ctx-owner-1")]
     assert client.sent == [("owner-1", "help text")]
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
+    assert store.get_runtime_state("ilink.delivery.12345") == "sent"
 
 
 def test_empty_gateway_reply_does_not_send_text_but_advances_cursor(tmp_path) -> None:
@@ -109,6 +110,7 @@ def test_empty_gateway_reply_does_not_send_text_but_advances_cursor(tmp_path) ->
     assert result.replies_sent == 0
     assert client.sent == []
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
+    assert store.get_runtime_state("ilink.delivery.12345") is None
 
 
 def test_send_failure_records_event_and_does_not_advance_cursor(tmp_path) -> None:
@@ -134,6 +136,7 @@ def test_send_failure_records_event_and_does_not_advance_cursor(tmp_path) -> Non
     assert result.replies_sent == 0
     assert result.cursor == "cursor-2"
     assert store.get_runtime_state("ilink.cursor") is None
+    assert store.get_runtime_state("ilink.delivery.12345") == "failed"
     events = store.list_events("delivery_failed")
     assert len(events) == 1
     payload = json.loads(str(events[0]["payload_json"]))
@@ -178,6 +181,7 @@ def test_failed_delivery_replays_stored_reply_without_rerunning_gateway(tmp_path
 
     assert first_result.replies_sent == 0
     assert store.get_runtime_state("ilink.outbox.12345") == "reply-1"
+    assert store.get_runtime_state("ilink.delivery.12345") == "failed"
 
     second_result = runtime.process_one_batch()
 
@@ -186,6 +190,47 @@ def test_failed_delivery_replays_stored_reply_without_rerunning_gateway(tmp_path
     assert client.sent == [("owner-1", "reply-1")]
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
     assert store.get_runtime_state("ilink.processed.12345") == "1"
+    assert store.get_runtime_state("ilink.delivery.12345") == "sent"
+
+
+def test_unknown_inflight_delivery_marks_processed_without_replay(tmp_path) -> None:
+    @dataclass
+    class FailingGateway:
+        called: bool = False
+
+        def handle(self, msg):
+            self.called = True
+            raise AssertionError("gateway should not run for unknown delivery")
+
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    store.initialize()
+    store.set_runtime_state("ilink.outbox.12345", "possibly delivered reply")
+    store.set_runtime_state("ilink.delivery.12345", "sending")
+    client = FakeIlinkClient(_batch(_private_message("replayed")))
+    gateway = FailingGateway()
+    runtime = OpeniLinkRuntime(
+        client=client,
+        gateway=gateway,
+        store=store,
+        owner_user_ids={"owner-1"},
+    )
+
+    result = runtime.process_one_batch()
+
+    assert result.messages_seen == 1
+    assert result.replies_sent == 0
+    assert gateway.called is False
+    assert client.sent == []
+    assert store.get_runtime_state("ilink.cursor") == "cursor-2"
+    assert store.get_runtime_state("ilink.processed.12345") == "1"
+    assert store.get_runtime_state("ilink.delivery.12345") == "unknown"
+    events = store.list_events("delivery_unknown")
+    assert len(events) == 1
+    payload = json.loads(str(events[0]["payload_json"]))
+    assert payload == {
+        "conversation_id": "owner-1",
+        "message_id": "12345",
+    }
 
 
 def test_partial_batch_failure_marks_successful_message_and_skips_duplicate_on_replay(tmp_path) -> None:
