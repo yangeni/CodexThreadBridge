@@ -110,17 +110,19 @@ CodexThreadBridge/
 
 ```text
 /add <alias> <session_id>       Add an owner private-chat alias.
+/bind <session_id>              Bind the default private-chat alias and select it.
 /use <alias>                    Set the active alias for ordinary messages.
 /list                           List aliases without a model turn.
+/remove <alias>                 Remove an owner private-chat alias. `/rm` is also accepted.
 /status [alias]                 Read controller status without a model turn.
 /refresh [alias]                Read local history without a model turn.
+/send <alias> <message>         Send one message to an alias without changing active context.
 /artifacts [alias]              List latest detected artifacts.
 /sendfile <artifact_id|all>     Return owner-private would-send results for allowed artifacts.
+/help                           Show Gateway command help.
 ```
 
-Gateway Core retains `/group approve|list|status|reset|disable` and group-side
-QA handling for future adapter work. Those commands are not exposed by the
-current v0.3 OpeniLink runtime.
+Gateway Core retains future-only `/group approve|list|status|reset|disable` and group-side QA handling for adapter work; those commands are not exposed by the current v0.3 OpeniLink runtime.
 
 ## Source Dependency
 
