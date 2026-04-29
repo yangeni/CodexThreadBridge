@@ -634,14 +634,19 @@ def test_runtime_smoke_add_use_and_dispatch_with_fake_controller(tmp_path) -> No
     ]
 
     class BatchClient(FakeIlinkClient):
+        def __init__(self) -> None:
+            super().__init__({})
+            self.cursor_calls: list[str] = []
+
         def get_updates(
             self,
             cursor: str,
             timeout_seconds: Optional[float] = None,
         ) -> dict:
+            self.cursor_calls.append(cursor)
             return batches.pop(0)
 
-    client = BatchClient({})
+    client = BatchClient()
     runtime = OpeniLinkRuntime(
         client=client,
         gateway=gateway,
@@ -659,4 +664,5 @@ def test_runtime_smoke_add_use_and_dispatch_with_fake_controller(tmp_path) -> No
         "done",
     ]
     assert [start["message"] for start in controller.starts] == ["please continue"]
+    assert client.cursor_calls == ["", "cursor-1", "cursor-2"]
     assert store.get_runtime_state("ilink.cursor") == "cursor-3"
