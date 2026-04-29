@@ -20,7 +20,7 @@ from codex_thread_bridge.models import (
 
 
 def test_package_version_available() -> None:
-    assert __version__ == "0.2.0"
+    assert __version__ == "0.4.0"
 
 
 def test_setup_cfg_version_matches_runtime_version() -> None:

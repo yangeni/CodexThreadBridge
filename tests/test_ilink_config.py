@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,55 @@ def test_openilink_runtime_config_loads_required_env(
     assert config.poll_timeout_seconds == 35.0
     assert config.request_timeout_seconds == 30.0
     assert config.controller_command == ()
+
+
+def test_openilink_runtime_config_loads_credentials_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credentials_path = tmp_path / "ilink_credentials.json"
+    credentials_path.write_text(
+        json.dumps(
+            {
+                "bot_token": "token-1",
+                "account_id": "bot-1",
+                "base_url": "https://ilinkai.weixin.qq.com/ilink/bot",
+            }
+        )
+    )
+    monkeypatch.setenv("CTB_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("ILINK_CREDENTIALS_PATH", str(credentials_path))
+    monkeypatch.setenv("ILINK_OWNER_USER_IDS", "owner-1")
+
+    config = OpeniLinkRuntimeConfig.from_env()
+
+    assert config.base_url == "https://ilinkai.weixin.qq.com/ilink/bot"
+    assert config.bot_token == "token-1"
+
+
+def test_openilink_runtime_config_resolves_relative_credentials_from_project_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credentials_path = tmp_path / "data" / "local" / "ilink_credentials.json"
+    credentials_path.parent.mkdir(parents=True)
+    credentials_path.write_text(
+        json.dumps(
+            {
+                "bot_token": "token-1",
+                "account_id": "bot-1",
+                "base_url": "https://ilinkai.weixin.qq.com/ilink/bot",
+            }
+        )
+    )
+    monkeypatch.setenv("CTB_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("ILINK_CREDENTIALS_PATH", "data/local/ilink_credentials.json")
+    monkeypatch.setenv("ILINK_OWNER_USER_IDS", "owner-1")
+
+    config = OpeniLinkRuntimeConfig.from_env()
+
+    assert config.base_url == "https://ilinkai.weixin.qq.com/ilink/bot"
+    assert config.bot_token == "token-1"
 
 
 def test_openilink_runtime_config_masks_secret_in_repr(

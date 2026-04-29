@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from codex_thread_bridge.adapters.ilink_auth import IlinkCredentialStore
+
 
 @dataclass(frozen=True)
 class BridgeConfig:
@@ -51,8 +53,7 @@ class OpeniLinkRuntimeConfig:
     @classmethod
     def from_env(cls) -> "OpeniLinkRuntimeConfig":
         project_root = Path(_required_env("CTB_PROJECT_ROOT")).resolve()
-        base_url = _required_env("ILINK_BASE_URL").rstrip("/")
-        bot_token = _required_env("ILINK_BOT_TOKEN")
+        base_url, bot_token = _load_ilink_channel_credentials(project_root)
         owner_user_ids = _parse_csv_env("ILINK_OWNER_USER_IDS")
         bridge = BridgeConfig.local_dev(project_root, set(owner_user_ids))
         return cls(
@@ -85,6 +86,35 @@ def _required_env(name: str) -> str:
     value = os.environ.get(name)
     if value is None or not value.strip():
         raise ValueError("missing required environment variable: %s" % name)
+    return value.strip()
+
+
+def _load_ilink_channel_credentials(project_root: Path) -> tuple[str, str]:
+    base_url = _optional_env("ILINK_BASE_URL")
+    bot_token = _optional_env("ILINK_BOT_TOKEN")
+    if base_url and bot_token:
+        return base_url.rstrip("/"), bot_token
+
+    credentials_path = _optional_env("ILINK_CREDENTIALS_PATH")
+    if credentials_path:
+        path = Path(credentials_path).expanduser()
+        if not path.is_absolute():
+            path = project_root / path
+        credentials = IlinkCredentialStore(path).load()
+        return (
+            (base_url or credentials.base_url).rstrip("/"),
+            bot_token or credentials.bot_token,
+        )
+
+    if not base_url:
+        raise ValueError("missing required environment variable: ILINK_BASE_URL")
+    raise ValueError("missing required environment variable: ILINK_BOT_TOKEN")
+
+
+def _optional_env(name: str) -> Optional[str]:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return None
     return value.strip()
 
 
