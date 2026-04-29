@@ -148,7 +148,15 @@ class IlinkHttpClient:
         }
 
     def _raise_for_ret(self, response: dict, operation: str) -> None:
-        ret = response.get("ret", 0)
+        if "ret" not in response:
+            raise IlinkClientError(
+                "iLink %s failed: missing integer ret" % operation
+            )
+        ret = response["ret"]
+        if not isinstance(ret, int) or isinstance(ret, bool):
+            raise IlinkClientError(
+                "iLink %s failed: malformed integer ret" % operation
+            )
         if ret != 0:
             message = response.get("errmsg") or response.get("errcode") or ret
             raise IlinkClientError(

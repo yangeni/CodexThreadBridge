@@ -101,3 +101,28 @@ def test_non_zero_ret_raises_sanitized_error() -> None:
 
     assert "session timeout" in str(excinfo.value)
     assert "secret-token" not in str(excinfo.value)
+
+
+def test_missing_ret_raises_sanitized_error() -> None:
+    client = IlinkHttpClient(
+        "https://ilink.example.test/bot",
+        "secret-token",
+        transport=RecordingTransport([{"error": "bad secret-token"}]),
+    )
+
+    with pytest.raises(IlinkClientError) as excinfo:
+        client.get_updates("", timeout_seconds=1.0)
+
+    assert "ret" in str(excinfo.value)
+    assert "secret-token" not in str(excinfo.value)
+
+
+def test_malformed_ret_raises_error() -> None:
+    client = IlinkHttpClient(
+        "https://ilink.example.test/bot",
+        "secret",
+        transport=RecordingTransport([{"ret": "0"}]),
+    )
+
+    with pytest.raises(IlinkClientError, match="ret"):
+        client.get_updates("", timeout_seconds=1.0)
