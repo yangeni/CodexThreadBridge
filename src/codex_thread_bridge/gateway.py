@@ -177,7 +177,7 @@ class Gateway:
             owner="ctb-private:%s" % msg.sender_id,
             policy=alias.policy,
             idempotency_key="%s:%s" % (msg.raw_ref, alias.alias),
-            expected_session_head=status.get("session_head"),
+            expected_session_head=None,
         )
         self.store.record_artifact_run(
             alias=alias.alias,
@@ -278,7 +278,7 @@ class Gateway:
             owner="ctb-group-qa:%s" % group_alias,
             policy=ExecutionPolicy.group_qa(),
             idempotency_key="%s:%s" % (msg.raw_ref, group_alias),
-            expected_session_head=status.get("session_head"),
+            expected_session_head=None,
         )
         if result.approval_summary:
             return OutgoingMessage(msg.conversation_id, result.approval_summary)

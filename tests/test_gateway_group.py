@@ -116,7 +116,7 @@ def test_owner_approves_group_and_group_uses_read_only_qa_session(tmp_path: Path
     assert dispatch_call["owner"] == "ctb-group-qa:friends"
     assert dispatch_call["policy"].sandbox == "read-only"
     assert dispatch_call["policy"].approval_policy == "never"
-    assert dispatch_call["expected_session_head"] == "head-1"
+    assert dispatch_call["expected_session_head"] is None
 
 
 def test_group_qa_not_ready_prevents_dispatch(tmp_path: Path) -> None:
@@ -157,7 +157,7 @@ def test_group_qa_dirty_or_reconcile_required_prevents_dispatch(tmp_path: Path) 
     assert len(controller.starts) == 1
 
 
-def test_group_qa_ready_forwards_non_default_session_head(tmp_path: Path) -> None:
+def test_group_qa_ready_does_not_fence_on_released_status_head(tmp_path: Path) -> None:
     gateway, _config, _store, controller = _gateway_for(tmp_path)
 
     gateway.handle(group_msg("@Bot hello", raw_ref="m-group-pending"))
@@ -173,7 +173,7 @@ def test_group_qa_ready_forwards_non_default_session_head(tmp_path: Path) -> Non
     reply = gateway.handle(group_msg("@Bot what is this project?", raw_ref="m-group-qa"))
 
     assert reply.text == "done"
-    assert controller.starts[-1]["expected_session_head"] == "group-head-9"
+    assert controller.starts[-1]["expected_session_head"] is None
 
 
 def test_group_work_command_is_forbidden_even_after_approval(tmp_path: Path) -> None:

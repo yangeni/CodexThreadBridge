@@ -208,11 +208,35 @@ def test_private_add_use_and_plain_dispatch(tmp_path: Path) -> None:
     assert controller.starts[0]["cwd"] == "/tmp/codex-target/code"
     assert controller.starts[0]["owner"] == "ctb-private:owner-1"
     assert controller.starts[0]["idempotency_key"] == "m-private:code"
-    assert controller.starts[0]["expected_session_head"] == "head-1"
+    assert controller.starts[0]["expected_session_head"] is None
     assert controller.starts[0]["policy"].writable_roots == ("/tmp/codex-target/code",)
     assert controller.starts[0]["policy"].approval_policy == "on-request"
     assert alias.default_cwd == "/tmp/codex-target/code"
     assert alias.policy.writable_roots == ("/tmp/codex-target/code",)
+
+
+def test_private_dispatch_does_not_fence_on_released_status_head_after_app_edits(
+    tmp_path: Path,
+) -> None:
+    gateway, _config, store, controller = _gateway_for(tmp_path)
+    store.upsert_alias(
+        "code",
+        "019-code",
+        "019-code",
+        "/tmp/codex-target/code",
+        ExecutionPolicy.work_default("/tmp/codex-target/code"),
+        "owner-1",
+    )
+    store.set_active_alias(private_msg("/use code").context_key, "code", "owner-1")
+    controller.status_by_session["019-code"] = _ready_status(
+        status="released",
+        session_head="stale-before-app-message",
+    )
+
+    reply = gateway.handle(private_msg("continue from phone"))
+
+    assert reply.text == "done"
+    assert controller.starts[0]["expected_session_head"] is None
 
 
 def test_private_plain_message_without_active_alias_is_rejected(tmp_path: Path) -> None:
