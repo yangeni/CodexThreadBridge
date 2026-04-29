@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,7 +50,7 @@ class OpeniLinkRuntimeConfig:
 
     @classmethod
     def from_env(cls) -> "OpeniLinkRuntimeConfig":
-        project_root = Path(os.environ.get("CTB_PROJECT_ROOT", ".")).resolve()
+        project_root = Path(_required_env("CTB_PROJECT_ROOT")).resolve()
         base_url = _required_env("ILINK_BASE_URL").rstrip("/")
         bot_token = _required_env("ILINK_BOT_TOKEN")
         owner_user_ids = _parse_csv_env("ILINK_OWNER_USER_IDS")
@@ -101,6 +102,9 @@ def _float_env(name: str, default: float) -> float:
     if value is None or not value.strip():
         return default
     try:
-        return float(value)
+        parsed = float(value)
     except ValueError:
         raise ValueError("invalid float environment variable: %s" % name) from None
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ValueError("invalid positive finite float environment variable: %s" % name)
+    return parsed

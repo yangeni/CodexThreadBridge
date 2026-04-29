@@ -7,12 +7,18 @@ import pytest
 from codex_thread_bridge.config import OpeniLinkRuntimeConfig
 
 
+def _set_required_openilink_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CTB_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("ILINK_BASE_URL", "https://ilink.example.test/bot")
+    monkeypatch.setenv("ILINK_BOT_TOKEN", "secret-token")
+    monkeypatch.setenv("ILINK_OWNER_USER_IDS", "owner-1")
+
+
 def test_openilink_runtime_config_loads_required_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("CTB_PROJECT_ROOT", str(tmp_path))
+    _set_required_openilink_env(tmp_path, monkeypatch)
     monkeypatch.setenv("ILINK_BASE_URL", "https://ilink.example.test/bot/")
-    monkeypatch.setenv("ILINK_BOT_TOKEN", "secret-token")
     monkeypatch.setenv("ILINK_OWNER_USER_IDS", "owner-1, owner-2")
 
     config = OpeniLinkRuntimeConfig.from_env()
@@ -29,10 +35,7 @@ def test_openilink_runtime_config_loads_required_env(
 def test_openilink_runtime_config_masks_secret_in_repr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("CTB_PROJECT_ROOT", str(tmp_path))
-    monkeypatch.setenv("ILINK_BASE_URL", "https://ilink.example.test/bot")
-    monkeypatch.setenv("ILINK_BOT_TOKEN", "secret-token")
-    monkeypatch.setenv("ILINK_OWNER_USER_IDS", "owner-1")
+    _set_required_openilink_env(tmp_path, monkeypatch)
 
     text = repr(OpeniLinkRuntimeConfig.from_env())
 
@@ -40,17 +43,48 @@ def test_openilink_runtime_config_masks_secret_in_repr(
     assert "bot_token='***'" in text
 
 
-@pytest.mark.parametrize("missing", ["ILINK_BASE_URL", "ILINK_BOT_TOKEN", "ILINK_OWNER_USER_IDS"])
+@pytest.mark.parametrize(
+    "missing",
+    ["CTB_PROJECT_ROOT", "ILINK_BASE_URL", "ILINK_BOT_TOKEN", "ILINK_OWNER_USER_IDS"],
+)
 def test_openilink_runtime_config_requires_channel_values(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     missing: str,
 ) -> None:
-    monkeypatch.setenv("CTB_PROJECT_ROOT", str(tmp_path))
-    monkeypatch.setenv("ILINK_BASE_URL", "https://ilink.example.test/bot")
-    monkeypatch.setenv("ILINK_BOT_TOKEN", "secret-token")
-    monkeypatch.setenv("ILINK_OWNER_USER_IDS", "owner-1")
+    _set_required_openilink_env(tmp_path, monkeypatch)
     monkeypatch.delenv(missing, raising=False)
 
     with pytest.raises(ValueError, match=missing):
+        OpeniLinkRuntimeConfig.from_env()
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_openilink_runtime_config_rejects_blank_project_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    blank: str,
+) -> None:
+    _set_required_openilink_env(tmp_path, monkeypatch)
+    monkeypatch.setenv("CTB_PROJECT_ROOT", blank)
+
+    with pytest.raises(ValueError, match="CTB_PROJECT_ROOT"):
+        OpeniLinkRuntimeConfig.from_env()
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["ILINK_POLL_TIMEOUT_SECONDS", "ILINK_REQUEST_TIMEOUT_SECONDS"],
+)
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0", "-1"])
+def test_openilink_runtime_config_rejects_invalid_timeout_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+) -> None:
+    _set_required_openilink_env(tmp_path, monkeypatch)
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError, match=name):
         OpeniLinkRuntimeConfig.from_env()
