@@ -67,22 +67,31 @@ class OpeniLinkRuntime:
                 self._mark_message_processed(message_id)
                 continue
 
-            msg = normalize_openilink_event(event.payload, self.owner_user_ids)
-            reply = self.gateway.handle(msg)
-            if not reply.text:
+            outbox_key = _outbox_message_key(message_id)
+            reply_text = self.store.get_runtime_state(outbox_key)
+            reply_conversation_id = event.context.conversation_id
+            if reply_text is None:
+                msg = normalize_openilink_event(event.payload, self.owner_user_ids)
+                reply = self.gateway.handle(msg)
+                reply_text = reply.text
+                reply_conversation_id = reply.conversation_id
+                if reply_text:
+                    self.store.set_runtime_state(outbox_key, reply_text)
+
+            if not reply_text:
                 self._mark_message_processed(message_id)
                 continue
             try:
                 self.client.send_text(
-                    conversation_id=reply.conversation_id,
-                    text=reply.text,
+                    conversation_id=reply_conversation_id,
+                    text=reply_text,
                 )
             except Exception as exc:
                 delivery_failed = True
                 self.store.record_event(
                     "delivery_failed",
                     {
-                        "conversation_id": reply.conversation_id,
+                        "conversation_id": reply_conversation_id,
                         "reason": _sanitize_error(exc, self.redacted_values),
                     },
                 )
@@ -184,6 +193,10 @@ def _sanitize_error(exc: Exception, redacted_values: Iterable[str]) -> str:
 
 def _processed_message_key(message_id: str) -> str:
     return "ilink.processed.%s" % message_id
+
+
+def _outbox_message_key(message_id: str) -> str:
+    return "ilink.outbox.%s" % message_id
 
 
 if __name__ == "__main__":

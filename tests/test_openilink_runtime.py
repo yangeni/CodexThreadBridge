@@ -143,6 +143,51 @@ def test_send_failure_records_event_and_does_not_advance_cursor(tmp_path) -> Non
     }
 
 
+def test_failed_delivery_replays_stored_reply_without_rerunning_gateway(tmp_path) -> None:
+    class FailsOnceClient(FakeIlinkClient):
+        def __init__(self, batch: dict) -> None:
+            super().__init__(batch)
+            self.should_fail = True
+
+        def send_text(self, *, conversation_id: str, text: str) -> None:
+            if self.should_fail:
+                self.should_fail = False
+                raise RuntimeError("network timeout")
+            self.sent.append((conversation_id, text))
+
+    @dataclass
+    class SideEffectingGateway:
+        calls: int = 0
+
+        def handle(self, msg):
+            self.calls += 1
+            return OutgoingMessage(msg.conversation_id, "reply-%d" % self.calls)
+
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    store.initialize()
+    client = FailsOnceClient(_batch(_private_message("side effect")))
+    gateway = SideEffectingGateway()
+    runtime = OpeniLinkRuntime(
+        client=client,
+        gateway=gateway,
+        store=store,
+        owner_user_ids={"owner-1"},
+    )
+
+    first_result = runtime.process_one_batch()
+
+    assert first_result.replies_sent == 0
+    assert store.get_runtime_state("ilink.outbox.12345") == "reply-1"
+
+    second_result = runtime.process_one_batch()
+
+    assert second_result.replies_sent == 1
+    assert gateway.calls == 1
+    assert client.sent == [("owner-1", "reply-1")]
+    assert store.get_runtime_state("ilink.cursor") == "cursor-2"
+    assert store.get_runtime_state("ilink.processed.12345") == "1"
+
+
 def test_partial_batch_failure_marks_successful_message_and_skips_duplicate_on_replay(tmp_path) -> None:
     class FailsSecondReplyOnceClient(FakeIlinkClient):
         def __init__(self, batch: dict) -> None:
@@ -173,7 +218,6 @@ def test_partial_batch_failure_marks_successful_message_and_skips_duplicate_on_r
         [
             OutgoingMessage("owner-1", "first reply"),
             OutgoingMessage("owner-1", "second reply"),
-            OutgoingMessage("owner-1", "second reply"),
         ],
         [],
     )
@@ -194,7 +238,7 @@ def test_partial_batch_failure_marks_successful_message_and_skips_duplicate_on_r
     second_result = runtime.process_one_batch()
 
     assert second_result.replies_sent == 1
-    assert gateway.seen_texts == ["first", "second", "second"]
+    assert gateway.seen_texts == ["first", "second"]
     assert client.sent == [("owner-1", "first reply"), ("owner-1", "second reply")]
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
     assert store.get_runtime_state("ilink.processed.msg-2") == "1"
