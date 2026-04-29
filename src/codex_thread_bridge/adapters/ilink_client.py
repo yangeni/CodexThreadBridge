@@ -11,6 +11,14 @@ class IlinkClientError(RuntimeError):
     pass
 
 
+class IlinkClientTransientError(IlinkClientError):
+    pass
+
+
+class IlinkClientFatalError(IlinkClientError):
+    pass
+
+
 class JsonTransport(Protocol):
     def post_json(
         self,
@@ -42,13 +50,15 @@ class UrllibJsonTransport:
                 payload = response.read().decode("utf-8")
         except urllib.error.URLError as exc:
             reason = getattr(exc, "reason", exc)
-            raise IlinkClientError("iLink HTTP request failed: %s" % reason) from exc
+            raise IlinkClientTransientError(
+                "iLink HTTP request failed: %s" % reason
+            ) from exc
         try:
             result = json.loads(payload)
         except ValueError as exc:
-            raise IlinkClientError("iLink response was not JSON") from exc
+            raise IlinkClientTransientError("iLink response was not JSON") from exc
         if not isinstance(result, dict):
-            raise IlinkClientError("iLink response was not an object")
+            raise IlinkClientTransientError("iLink response was not an object")
         return result
 
 
@@ -93,7 +103,9 @@ class IlinkHttpClient:
         context_token: str,
     ) -> None:
         if not conversation_id or not to_user_id:
-            raise IlinkClientError("conversation context identifiers must not be empty")
+            raise IlinkClientFatalError(
+                "conversation context identifiers must not be empty"
+            )
         self._contexts[conversation_id] = ConversationContext(
             to_user_id=to_user_id,
             context_token=context_token,
@@ -102,7 +114,7 @@ class IlinkHttpClient:
     def send_text(self, *, conversation_id: str, text: str) -> None:
         context = self._contexts.get(conversation_id)
         if context is None:
-            raise IlinkClientError(
+            raise IlinkClientFatalError(
                 "missing conversation context for %s" % conversation_id
             )
         response = self._post(
@@ -149,17 +161,17 @@ class IlinkHttpClient:
 
     def _raise_for_ret(self, response: dict, operation: str) -> None:
         if "ret" not in response:
-            raise IlinkClientError(
+            raise IlinkClientFatalError(
                 "iLink %s failed: missing integer ret" % operation
             )
         ret = response["ret"]
         if not isinstance(ret, int) or isinstance(ret, bool):
-            raise IlinkClientError(
+            raise IlinkClientFatalError(
                 "iLink %s failed: malformed integer ret" % operation
             )
         if ret != 0:
             message = response.get("errmsg") or response.get("errcode") or ret
-            raise IlinkClientError(
+            raise IlinkClientFatalError(
                 "iLink %s failed: %s" % (operation, self._sanitize(message))
             )
 

@@ -4,6 +4,7 @@ import pytest
 
 from codex_thread_bridge.adapters.ilink_client import (
     IlinkClientError,
+    IlinkClientFatalError,
     IlinkHttpClient,
 )
 
@@ -96,7 +97,7 @@ def test_non_zero_ret_raises_sanitized_error() -> None:
         ),
     )
 
-    with pytest.raises(IlinkClientError) as excinfo:
+    with pytest.raises(IlinkClientFatalError) as excinfo:
         client.get_updates("", timeout_seconds=1.0)
 
     assert "session timeout" in str(excinfo.value)
@@ -110,7 +111,7 @@ def test_missing_ret_raises_sanitized_error() -> None:
         transport=RecordingTransport([{"error": "bad secret-token"}]),
     )
 
-    with pytest.raises(IlinkClientError) as excinfo:
+    with pytest.raises(IlinkClientFatalError) as excinfo:
         client.get_updates("", timeout_seconds=1.0)
 
     assert "ret" in str(excinfo.value)
@@ -124,5 +125,5 @@ def test_malformed_ret_raises_error() -> None:
         transport=RecordingTransport([{"ret": "0"}]),
     )
 
-    with pytest.raises(IlinkClientError, match="ret"):
+    with pytest.raises(IlinkClientFatalError, match="ret"):
         client.get_updates("", timeout_seconds=1.0)

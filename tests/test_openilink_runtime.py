@@ -6,6 +6,7 @@ from typing import Optional
 
 import pytest
 
+from codex_thread_bridge.adapters.ilink_client import IlinkClientFatalError
 from codex_thread_bridge.adapters import openilink_runtime as runtime_module
 from codex_thread_bridge.adapters.openilink_runtime import (
     OpeniLinkRuntime,
@@ -49,13 +50,20 @@ class FakeIlinkClient:
         self.sent.append((conversation_id, text))
 
 
-def _private_message(text: str = "/help") -> dict:
+def _private_message(
+    text: str = "/help",
+    *,
+    message_id: object = 12345,
+    from_user_id: str = "owner-1",
+    to_user_id: str = "bot-1",
+    context_token: Optional[str] = None,
+) -> dict:
     return {
-        "message_id": 12345,
-        "from_user_id": "owner-1",
-        "to_user_id": "bot-1",
+        "message_id": message_id,
+        "from_user_id": from_user_id,
+        "to_user_id": to_user_id,
         "message_state": 2,
-        "context_token": "ctx-owner-1",
+        "context_token": context_token or "ctx-%s" % from_user_id,
         "item_list": [{"type": 1, "text_item": {"text": text}}],
     }
 
@@ -89,7 +97,7 @@ def test_process_one_batch_handles_private_message_sends_reply_and_advances_curs
     assert client.contexts == [("owner-1", "owner-1", "ctx-owner-1")]
     assert client.sent == [("owner-1", "help text")]
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
-    assert store.get_runtime_state("ilink.delivery.12345") == "sent"
+    assert store.get_runtime_state("ilink.delivery.owner-1.12345") == "sent"
 
 
 def test_empty_gateway_reply_does_not_send_text_but_advances_cursor(tmp_path) -> None:
@@ -113,7 +121,7 @@ def test_empty_gateway_reply_does_not_send_text_but_advances_cursor(tmp_path) ->
     assert store.get_runtime_state("ilink.delivery.12345") is None
 
 
-def test_send_failure_records_event_and_does_not_advance_cursor(tmp_path) -> None:
+def test_send_exception_marks_delivery_unknown_without_replay(tmp_path) -> None:
     class FailingSendClient(FakeIlinkClient):
         def send_text(self, *, conversation_id: str, text: str) -> None:
             raise RuntimeError("network timeout secret-token")
@@ -136,17 +144,58 @@ def test_send_failure_records_event_and_does_not_advance_cursor(tmp_path) -> Non
     assert result.replies_sent == 0
     assert result.cursor == "cursor-2"
     assert store.get_runtime_state("ilink.cursor") is None
-    assert store.get_runtime_state("ilink.delivery.12345") == "failed"
+    assert store.get_runtime_state("ilink.delivery.owner-1.12345") == "unknown"
+    assert store.get_runtime_state("ilink.processed.owner-1.12345") == "1"
+    events = store.list_events("delivery_unknown")
+    assert len(events) == 1
+    payload = json.loads(str(events[0]["payload_json"]))
+    assert payload == {
+        "conversation_id": "owner-1",
+        "message_id": "12345",
+        "reason": "network timeout [redacted]",
+    }
+
+    second_result = runtime.process_one_batch()
+
+    assert second_result.replies_sent == 0
+    assert gateway.seen_texts == ["/help"]
+    assert client.sent == []
+    assert store.get_runtime_state("ilink.cursor") == "cursor-2"
+
+
+def test_terminal_send_error_records_failed_delivery_with_message_id(tmp_path) -> None:
+    class FatalSendClient(FakeIlinkClient):
+        def send_text(self, *, conversation_id: str, text: str) -> None:
+            raise IlinkClientFatalError("iLink sendmessage failed: auth secret-token")
+
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    store.initialize()
+    client = FatalSendClient(_batch(_private_message()))
+    gateway = FakeGateway([OutgoingMessage("owner-1", "help text")], [])
+    runtime = OpeniLinkRuntime(
+        client=client,
+        gateway=gateway,
+        store=store,
+        owner_user_ids={"owner-1"},
+        redacted_values={"secret-token"},
+    )
+
+    with pytest.raises(IlinkClientFatalError, match="auth"):
+        runtime.process_one_batch()
+
+    assert store.get_runtime_state("ilink.cursor") is None
+    assert store.get_runtime_state("ilink.delivery.owner-1.12345") == "failed"
     events = store.list_events("delivery_failed")
     assert len(events) == 1
     payload = json.loads(str(events[0]["payload_json"]))
     assert payload == {
         "conversation_id": "owner-1",
-        "reason": "network timeout [redacted]",
+        "message_id": "12345",
+        "reason": "iLink sendmessage failed: auth [redacted]",
     }
 
 
-def test_failed_delivery_replays_stored_reply_without_rerunning_gateway(tmp_path) -> None:
+def test_send_exception_does_not_rerun_gateway_or_auto_replay_outbox(tmp_path) -> None:
     class FailsOnceClient(FakeIlinkClient):
         def __init__(self, batch: dict) -> None:
             super().__init__(batch)
@@ -180,17 +229,17 @@ def test_failed_delivery_replays_stored_reply_without_rerunning_gateway(tmp_path
     first_result = runtime.process_one_batch()
 
     assert first_result.replies_sent == 0
-    assert store.get_runtime_state("ilink.outbox.12345") == "reply-1"
-    assert store.get_runtime_state("ilink.delivery.12345") == "failed"
+    assert store.get_runtime_state("ilink.outbox.owner-1.12345") == "reply-1"
+    assert store.get_runtime_state("ilink.delivery.owner-1.12345") == "unknown"
+    assert store.get_runtime_state("ilink.processed.owner-1.12345") == "1"
 
     second_result = runtime.process_one_batch()
 
-    assert second_result.replies_sent == 1
+    assert second_result.replies_sent == 0
     assert gateway.calls == 1
-    assert client.sent == [("owner-1", "reply-1")]
+    assert client.sent == []
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
-    assert store.get_runtime_state("ilink.processed.12345") == "1"
-    assert store.get_runtime_state("ilink.delivery.12345") == "sent"
+    assert store.get_runtime_state("ilink.delivery.owner-1.12345") == "unknown"
 
 
 def test_unknown_inflight_delivery_marks_processed_without_replay(tmp_path) -> None:
@@ -204,8 +253,11 @@ def test_unknown_inflight_delivery_marks_processed_without_replay(tmp_path) -> N
 
     store = BridgeStore(tmp_path / "bridge.sqlite3")
     store.initialize()
-    store.set_runtime_state("ilink.outbox.12345", "possibly delivered reply")
-    store.set_runtime_state("ilink.delivery.12345", "sending")
+    store.set_runtime_state(
+        "ilink.outbox.owner-1.12345",
+        "possibly delivered reply",
+    )
+    store.set_runtime_state("ilink.delivery.owner-1.12345", "sending")
     client = FakeIlinkClient(_batch(_private_message("replayed")))
     gateway = FailingGateway()
     runtime = OpeniLinkRuntime(
@@ -222,8 +274,8 @@ def test_unknown_inflight_delivery_marks_processed_without_replay(tmp_path) -> N
     assert gateway.called is False
     assert client.sent == []
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
-    assert store.get_runtime_state("ilink.processed.12345") == "1"
-    assert store.get_runtime_state("ilink.delivery.12345") == "unknown"
+    assert store.get_runtime_state("ilink.processed.owner-1.12345") == "1"
+    assert store.get_runtime_state("ilink.delivery.owner-1.12345") == "unknown"
     events = store.list_events("delivery_unknown")
     assert len(events) == 1
     payload = json.loads(str(events[0]["payload_json"]))
@@ -233,7 +285,7 @@ def test_unknown_inflight_delivery_marks_processed_without_replay(tmp_path) -> N
     }
 
 
-def test_partial_batch_failure_marks_successful_message_and_skips_duplicate_on_replay(tmp_path) -> None:
+def test_partial_batch_send_exception_marks_unknown_and_skips_duplicate_on_replay(tmp_path) -> None:
     class FailsSecondReplyOnceClient(FakeIlinkClient):
         def __init__(self, batch: dict) -> None:
             super().__init__(batch)
@@ -277,16 +329,61 @@ def test_partial_batch_failure_marks_successful_message_and_skips_duplicate_on_r
 
     assert first_result.replies_sent == 1
     assert store.get_runtime_state("ilink.cursor") == "cursor-1"
-    assert store.get_runtime_state("ilink.processed.msg-1") == "1"
-    assert store.get_runtime_state("ilink.processed.msg-2") is None
+    assert store.get_runtime_state("ilink.processed.owner-1.msg-1") == "1"
+    assert store.get_runtime_state("ilink.processed.owner-1.msg-2") == "1"
+    assert store.get_runtime_state("ilink.delivery.owner-1.msg-2") == "unknown"
 
     second_result = runtime.process_one_batch()
 
-    assert second_result.replies_sent == 1
+    assert second_result.replies_sent == 0
     assert gateway.seen_texts == ["first", "second"]
-    assert client.sent == [("owner-1", "first reply"), ("owner-1", "second reply")]
+    assert client.sent == [("owner-1", "first reply")]
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
-    assert store.get_runtime_state("ilink.processed.msg-2") == "1"
+    assert store.get_runtime_state("ilink.processed.owner-1.msg-2") == "1"
+
+
+def test_same_message_id_in_different_conversations_uses_distinct_runtime_state(
+    tmp_path,
+) -> None:
+    first = _private_message(
+        "first",
+        message_id="shared",
+        from_user_id="owner-1",
+        context_token="ctx-owner-1",
+    )
+    second = _private_message(
+        "second",
+        message_id="shared",
+        from_user_id="owner-2",
+        context_token="ctx-owner-2",
+    )
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    store.initialize()
+    client = FakeIlinkClient(_batch(first, second))
+    gateway = FakeGateway(
+        [
+            OutgoingMessage("owner-1", "first reply"),
+            OutgoingMessage("owner-2", "second reply"),
+        ],
+        [],
+    )
+    runtime = OpeniLinkRuntime(
+        client=client,
+        gateway=gateway,
+        store=store,
+        owner_user_ids={"owner-1", "owner-2"},
+    )
+
+    result = runtime.process_one_batch()
+
+    assert result.replies_sent == 2
+    assert gateway.seen_texts == ["first", "second"]
+    assert client.sent == [
+        ("owner-1", "first reply"),
+        ("owner-2", "second reply"),
+    ]
+    assert store.get_runtime_state("ilink.processed.owner-1.shared") == "1"
+    assert store.get_runtime_state("ilink.processed.owner-2.shared") == "1"
 
 
 def test_group_message_is_ignored_by_v03_runtime_without_calling_gateway(tmp_path) -> None:
@@ -355,10 +452,10 @@ def test_private_group_management_command_is_rejected_before_gateway(tmp_path) -
         ("owner-1", "Group QA runtime is not enabled in v0.3.")
     ]
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
-    assert store.get_runtime_state("ilink.processed.12345") == "1"
+    assert store.get_runtime_state("ilink.processed.owner-1.12345") == "1"
 
 
-def test_failed_group_management_rejection_replays_without_gateway(tmp_path) -> None:
+def test_failed_group_management_rejection_marks_unknown_without_gateway_replay(tmp_path) -> None:
     class FailsOnceClient(FakeIlinkClient):
         def __init__(self, batch: dict) -> None:
             super().__init__(batch)
@@ -395,20 +492,19 @@ def test_failed_group_management_rejection_replays_without_gateway(tmp_path) -> 
     assert gateway.called is False
     assert store.get_runtime_state("ilink.cursor") is None
     assert (
-        store.get_runtime_state("ilink.outbox.12345")
+        store.get_runtime_state("ilink.outbox.owner-1.12345")
         == "Group QA runtime is not enabled in v0.3."
     )
-    assert store.get_runtime_state("ilink.processed.12345") is None
+    assert store.get_runtime_state("ilink.processed.owner-1.12345") == "1"
+    assert store.get_runtime_state("ilink.delivery.owner-1.12345") == "unknown"
 
     second_result = runtime.process_one_batch()
 
-    assert second_result.replies_sent == 1
+    assert second_result.replies_sent == 0
     assert gateway.called is False
-    assert client.sent == [
-        ("owner-1", "Group QA runtime is not enabled in v0.3.")
-    ]
+    assert client.sent == []
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
-    assert store.get_runtime_state("ilink.processed.12345") == "1"
+    assert store.get_runtime_state("ilink.processed.owner-1.12345") == "1"
 
 
 def test_malformed_message_records_event_and_later_valid_message_still_advances_cursor(tmp_path) -> None:
@@ -514,6 +610,34 @@ def test_run_forever_records_runtime_error_and_continues_to_next_batch(tmp_path)
     assert len(events) == 1
     payload = json.loads(str(events[0]["payload_json"]))
     assert payload == {"reason": "temporary outage [redacted]"}
+
+
+def test_run_forever_reraises_terminal_ilink_error(tmp_path) -> None:
+    class FatalClient(FakeIlinkClient):
+        def get_updates(
+            self, cursor: str, timeout_seconds: Optional[float] = None
+        ) -> dict:
+            raise IlinkClientFatalError("iLink getupdates failed: auth expired")
+
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    store.initialize()
+    client = FatalClient(_batch(_private_message()))
+    gateway = FakeGateway([], [])
+    runtime = OpeniLinkRuntime(
+        client=client,
+        gateway=gateway,
+        store=store,
+        owner_user_ids={"owner-1"},
+    )
+
+    with pytest.raises(IlinkClientFatalError, match="auth expired"):
+        runtime.run_forever(
+            poll_timeout_seconds=0.0,
+            idle_sleep_seconds=0.0,
+            max_batches=1,
+        )
+
+    assert store.list_events("runtime_error") == []
 
 
 def test_runtime_smoke_add_use_and_dispatch_with_fake_controller(tmp_path) -> None:

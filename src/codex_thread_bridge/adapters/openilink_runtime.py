@@ -5,11 +5,17 @@ import time
 from dataclasses import dataclass
 from typing import Iterable, Optional, Sequence
 
-from codex_thread_bridge.adapters.ilink_client import IlinkHttpClient
+from codex_thread_bridge.adapters.ilink_client import (
+    IlinkClientFatalError,
+    IlinkHttpClient,
+)
 from codex_thread_bridge.adapters.ilink_events import IlinkEventError, map_update_batch
 from codex_thread_bridge.adapters.openilink import normalize_openilink_event
 from codex_thread_bridge.config import OpeniLinkRuntimeConfig
-from codex_thread_bridge.controller_client import McpControllerClient
+from codex_thread_bridge.controller_client import (
+    McpControllerClient,
+    McpControllerClientError,
+)
 from codex_thread_bridge.gateway import Gateway
 from codex_thread_bridge.stores import BridgeStore
 
@@ -54,14 +60,15 @@ class OpeniLinkRuntime:
         batch = self.client.get_updates(cursor, timeout_seconds=timeout_seconds)
         events = map_update_batch(batch, on_error=self._record_malformed_message)
         replies_sent = 0
-        delivery_failed = False
+        delivery_interrupted = False
 
         for event in events:
             message_id = str(event.payload["message_id"])
-            if self.store.get_runtime_state(_processed_message_key(message_id)):
+            message_ref = _message_ref(event.context.conversation_id, message_id)
+            if self.store.get_runtime_state(_processed_message_key(message_ref)):
                 continue
 
-            delivery_key = _delivery_message_key(message_id)
+            delivery_key = _delivery_message_key(message_ref)
             delivery_state = self.store.get_runtime_state(delivery_key)
             if delivery_state == _DELIVERY_SENDING:
                 self.store.record_event(
@@ -71,7 +78,7 @@ class OpeniLinkRuntime:
                         "message_id": message_id,
                     },
                 )
-                self._mark_message_processed(message_id)
+                self._mark_message_processed(message_ref)
                 self.store.set_runtime_state(delivery_key, _DELIVERY_UNKNOWN)
                 continue
 
@@ -83,12 +90,15 @@ class OpeniLinkRuntime:
             if event.payload.get("conversation_type") != "private":
                 self.store.record_event(
                     "ignored_non_private_message",
-                    {"conversation_id": event.context.conversation_id},
+                    {
+                        "conversation_id": event.context.conversation_id,
+                        "message_id": message_id,
+                    },
                 )
-                self._mark_message_processed(message_id)
+                self._mark_message_processed(message_ref)
                 continue
 
-            outbox_key = _outbox_message_key(message_id)
+            outbox_key = _outbox_message_key(message_ref)
             reply_text = self.store.get_runtime_state(outbox_key)
             reply_conversation_id = event.context.conversation_id
             if reply_text is None:
@@ -103,7 +113,7 @@ class OpeniLinkRuntime:
                     self.store.set_runtime_state(outbox_key, reply_text)
 
             if not reply_text:
-                self._mark_message_processed(message_id)
+                self._mark_message_processed(message_ref)
                 continue
             self.store.set_runtime_state(delivery_key, _DELIVERY_SENDING)
             try:
@@ -112,22 +122,35 @@ class OpeniLinkRuntime:
                     text=reply_text,
                 )
             except Exception as exc:
-                delivery_failed = True
-                self.store.set_runtime_state(delivery_key, _DELIVERY_FAILED)
+                if _is_terminal_runtime_error(exc):
+                    self.store.set_runtime_state(delivery_key, _DELIVERY_FAILED)
+                    self.store.record_event(
+                        "delivery_failed",
+                        {
+                            "conversation_id": reply_conversation_id,
+                            "message_id": message_id,
+                            "reason": _sanitize_error(exc, self.redacted_values),
+                        },
+                    )
+                    raise
+                delivery_interrupted = True
+                self.store.set_runtime_state(delivery_key, _DELIVERY_UNKNOWN)
                 self.store.record_event(
-                    "delivery_failed",
+                    "delivery_unknown",
                     {
                         "conversation_id": reply_conversation_id,
+                        "message_id": message_id,
                         "reason": _sanitize_error(exc, self.redacted_values),
                     },
                 )
+                self._mark_message_processed(message_ref)
                 break
-            self._mark_message_processed(message_id)
+            self._mark_message_processed(message_ref)
             self.store.set_runtime_state(delivery_key, _DELIVERY_SENT)
             replies_sent += 1
 
         new_cursor = str(batch.get("get_updates_buf") or cursor)
-        if not delivery_failed:
+        if not delivery_interrupted:
             self.store.set_runtime_state("ilink.cursor", new_cursor)
         return RuntimeBatchResult(
             messages_seen=len(events),
@@ -146,6 +169,8 @@ class OpeniLinkRuntime:
             try:
                 result = self.process_one_batch(timeout_seconds=poll_timeout_seconds)
             except Exception as exc:
+                if _is_terminal_runtime_error(exc):
+                    raise
                 self.store.record_event(
                     "runtime_error",
                     {"reason": _sanitize_error(exc, self.redacted_values)},
@@ -162,8 +187,8 @@ class OpeniLinkRuntime:
             {"index": index, "reason": _sanitize_error(error, self.redacted_values)},
         )
 
-    def _mark_message_processed(self, message_id: str) -> None:
-        self.store.set_runtime_state(_processed_message_key(message_id), "1")
+    def _mark_message_processed(self, message_ref: str) -> None:
+        self.store.set_runtime_state(_processed_message_key(message_ref), "1")
 
 
 def build_runtime_from_env() -> OpeniLinkRuntime:
@@ -225,16 +250,31 @@ def _is_group_management_command(text: str) -> bool:
     return stripped.split(None, 1)[0].lower() == "/group"
 
 
-def _processed_message_key(message_id: str) -> str:
-    return "ilink.processed.%s" % message_id
+def _is_terminal_runtime_error(exc: Exception) -> bool:
+    return isinstance(
+        exc,
+        (
+            IlinkClientFatalError,
+            McpControllerClientError,
+            ValueError,
+        ),
+    )
 
 
-def _outbox_message_key(message_id: str) -> str:
-    return "ilink.outbox.%s" % message_id
+def _message_ref(conversation_id: str, message_id: str) -> str:
+    return "%s.%s" % (conversation_id, message_id)
 
 
-def _delivery_message_key(message_id: str) -> str:
-    return "ilink.delivery.%s" % message_id
+def _processed_message_key(message_ref: str) -> str:
+    return "ilink.processed.%s" % message_ref
+
+
+def _outbox_message_key(message_ref: str) -> str:
+    return "ilink.outbox.%s" % message_ref
+
+
+def _delivery_message_key(message_ref: str) -> str:
+    return "ilink.delivery.%s" % message_ref
 
 
 if __name__ == "__main__":

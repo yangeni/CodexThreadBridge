@@ -189,9 +189,11 @@ Controller errors should reuse the existing Gateway-visible safe messages. If a
 dispatch fails after acquiring a controller lock, the existing controller cleanup
 sequence must still run.
 
-If outbound reply sending fails after Codex completed the task, the runtime
-should keep a local failed-delivery event with message id, conversation id, and
-sanitized reason. It should not retry forever without operator visibility.
+If outbound reply sending becomes ambiguous after Codex completed the task, the
+runtime should record a local `delivery_unknown` event with message id,
+conversation id, and sanitized reason. It should prefer avoiding duplicate
+WeChat replies over automatic resend. Explicit terminal channel/controller
+errors should stop the runtime with a local error instead of retrying forever.
 
 ## Test Strategy
 

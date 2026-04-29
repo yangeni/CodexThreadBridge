@@ -16,6 +16,12 @@ This plan implements one narrow v0.3 slice: real WeChat private-chat text runtim
 
 The plan intentionally depends on the iLink/OpenClaw-WeChat protocol shape rather than `wechat-claude-code`. `wechat-claude-code` can remain an interaction reference, but no code or package from it should enter this project.
 
+Post-review adjustment: the final implementation treats outbound `sendmessage`
+transport exceptions as ambiguous delivery. It records `delivery_unknown`, scopes
+runtime state by `<conversation_id>.<message_id>`, marks the source message
+processed, and does not auto-replay the outbox. Explicit terminal iLink or
+controller errors stop the runtime instead of being retried forever.
+
 ## Source References
 
 - Spec: `docs/superpowers/specs/2026-04-29-openilink-runtime-design.md`
