@@ -17,6 +17,7 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
+.DS_Store
 
 # Build artifacts
 dist/
