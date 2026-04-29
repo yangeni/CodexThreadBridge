@@ -1,66 +1,106 @@
 # CodexThreadBridge
 
 CodexThreadBridge is a local gateway project for connecting mobile chat
-surfaces, such as Feishu, QQ, or WeChat, to long-lived Codex history threads.
+surfaces to long-lived Codex history threads.
 
-The first version is intentionally small: it binds an external chat context to
-an existing Codex session, sends text messages through the
-`cross-thread-controller` MCP server, returns the completed response, and
-supports manual refresh from local Codex history. It does not poll the model,
-does not create heartbeat turns, and does not try to control the Codex App UI.
+The v0.2 slice is a WeChat-first mobile Agent console. It keeps platform
+protocol details behind channel adapters, routes normalized chat events through
+Gateway Core, and uses the `cross-thread-controller` boundary to continue
+existing Codex sessions.
 
 ## Current Status
 
-This folder currently contains the design scaffold only. Business code is not
-implemented yet.
+v0.2 is implemented as a local Python package with a simulator, SQLite-backed
+state, Gateway Core policy checks, a controller client boundary, and an
+OpeniLink-compatible WeChat adapter boundary.
+
+The current runtime behavior is:
+
+- WeChat is the first mobile console target for v0.2.
+- Owner private chat can dispatch work to existing Codex aliases with
+  `/add <alias> <session_id>` and `/use <alias>`.
+- Approved WeChat groups use isolated QA sessions with read-only policy and
+  `approval_policy=never`.
+- Status/refresh/list do not create model turns; alias listing/status commands
+  are read-only Gateway/controller operations.
+- Artifacts are only eligible for delivery to the owner private chat after
+  local path, root, freshness, size, and sensitive-path checks.
+- Feishu and Windows remain adapter targets, not v0.2 deliverables.
 
 ## Project Layout
 
 ```text
 CodexThreadBridge/
 ├── README.md
+├── setup.py
+├── setup.cfg
+├── pytest.ini
 ├── docs/
 │   ├── 00_设计草稿.md
-│   └── 01_MVP实施方案.md
+│   ├── 01_MVP实施方案.md
+│   └── 02_v0.2运行说明.md
+├── src/
+│   └── codex_thread_bridge/
+│       ├── gateway.py
+│       ├── controller_client.py
+│       ├── stores.py
+│       ├── policy.py
+│       ├── artifacts.py
+│       └── adapters/
+│           ├── local.py
+│           ├── wechat_channel.py
+│           └── openilink.py
+├── tests/
 └── data/
     └── attachments/
         └── .gitignore
 ```
 
-## First-Version Scope
+## v0.2 Scope
 
 - Runtime: local Python service on this Mac.
 - Controller integration: MCP stdio calls to `cross-thread-controller`.
-- First adapters: local simulation adapter first, Feishu adapter second.
-- Binding model: explicit `/bind <session_id>` to an existing Codex thread.
-- Default mode: hybrid mode. Before binding, the gateway handles routing and
-  binding. After binding, ordinary chat messages go directly to the target
-  Codex session.
+- First adapters: local simulator and OpeniLink-compatible WeChat boundary.
+- Binding model: owner private chat maps short aliases to existing Codex
+  session IDs.
+- Default mode: after `/use <alias>`, ordinary owner private-chat messages go
+  directly to the target Codex session through the controller boundary.
+- Group mode: owner-approved WeChat groups get isolated read-only QA sessions,
+  not write-capable work aliases.
 - Result mode: return the completed response as one message.
-- Image mode: save images under `data/attachments/` and forward the local path
-  in the text message. True multimodal attachment passthrough is out of scope
-  for v1.
+- Artifact mode: detected local files are listed and delivered only after
+  safety checks, and only through owner private chat.
 
 ## Hard Boundaries
 
 - No model heartbeat. Background sync may read local state or Codex JSONL files,
   but must not send turns such as "are you still there?" or "report status".
-- No automatic realtime sync in v1. Mobile-initiated runs return results; Codex
+- No automatic realtime sync in v0.2. Mobile-initiated runs return results; Codex
   App manual changes are pulled with `/refresh`.
-- No unbounded execution authority. Default runs are read-only. Higher-risk
-  actions require explicit confirmation and structured authorization.
+- No group work dispatch. Groups cannot dispatch work aliases, approve actions,
+  reset themselves, or receive local files.
+- No unbounded execution authority. Private work aliases use the existing
+  Codex session workspace with `approval_policy=on-request`; group QA is
+  read-only with approvals disabled.
 - No direct dependency on `cross-thread-controller` internals. The gateway should
   treat the controller as an MCP server boundary.
 
-## Planned Commands
+## Current Command Shape
 
 ```text
-/bind <session_id>          Bind current chat context to a Codex session.
-/unbind                     Remove the current binding.
-/status                     Show binding and controller state.
-/refresh                    Pull new local Codex history without model calls.
-/send <session_id> <text>   Send one temporary message to a specific session.
-/help                       Show supported commands.
+/add <alias> <session_id>       Add an owner private-chat alias.
+/use <alias>                    Set the active alias for ordinary messages.
+/list                           List aliases without a model turn.
+/status [alias]                 Read controller status without a model turn.
+/refresh [alias]                Read local history without a model turn.
+/artifacts [alias]              List latest detected artifacts.
+/sendfile <artifact_id|all>     Send allowed artifacts to owner private chat.
+/group approve <group> [alias]  Owner-only approval for isolated group QA.
+/group list                     Owner-only group listing.
+/group status <group|alias>     Owner-only group status.
+/group reset <group|alias>      Owner-only reset to pending.
+/group disable <group|alias>    Owner-only disable.
+@Bot /qa status                 Group-side QA status check.
 ```
 
 ## Source Dependency
@@ -76,4 +116,3 @@ The controller MCP state lives at:
 ```text
 /Users/clngs/.codex/cross-thread-controller/state.sqlite3
 ```
-

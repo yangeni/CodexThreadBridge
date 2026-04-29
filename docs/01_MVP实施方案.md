@@ -1,11 +1,22 @@
 # CodexThreadBridge MVP 实施方案
 
-版本：v0.1 草稿  
+版本：v0.2 当前实现说明，保留 v0.1 历史
 日期：2026-04-28
 
 ## 1. MVP 范围
 
-第一版只实现最小可用线程桥：
+v0.2 的当前范围已经从 v0.1 的 Feishu-first 设计骨架，收敛为 WeChat-first mobile Agent console：
+
+- 本机 Python Gateway Core。
+- SQLite-backed alias、active context、group、artifact state。
+- 本地模拟 adapter。
+- OpeniLink-compatible WeChat channel adapter boundary。
+- owner 私聊通过 alias dispatch 到已有 Codex session。
+- 已批准微信群使用隔离 read-only QA session。
+- artifact 只在 owner 私聊中经过安全检查后发送。
+- `/status`、`/refresh`、`/list`、`/group list`、`/group status`、`@Bot /qa status` 不创建模型 turn。
+
+v0.1 历史目标是最小可用线程桥：
 
 - 本机 Python Gateway。
 - 本地模拟 adapter。
@@ -24,13 +35,24 @@
 - 不做真正多模态附件透传。
 - 不接微信个人号逆向方案。
 
+v0.2 明确不交付：
+
+- Feishu UI/adapter 完整接入。
+- Windows packaging。
+- 移动端 approval-confirmation proxy。
+- 微信个人号逆向 hook。
+- 自动实时同步或模型心跳。
+
 ## 2. 工程骨架
 
-建议后续代码结构：
+当前 v0.2 代码结构：
 
 ```text
 CodexThreadBridge/
 ├── README.md
+├── setup.py
+├── setup.cfg
+├── pytest.ini
 ├── docs/
 ├── data/
 │   ├── bridge.sqlite3
@@ -38,122 +60,160 @@ CodexThreadBridge/
 ├── src/
 │   └── codex_thread_bridge/
 │       ├── __init__.py
+│       ├── artifacts.py
+│       ├── commands.py
+│       ├── config.py
+│       ├── controller_client.py
 │       ├── gateway.py
-│       ├── mcp_client.py
+│       ├── models.py
+│       ├── policy.py
 │       ├── stores.py
 │       ├── refresh.py
-│       ├── security.py
 │       └── adapters/
 │           ├── local.py
-│           └── feishu.py
+│           ├── openilink.py
+│           └── wechat_channel.py
 └── tests/
 ```
 
-本次落地只创建文档和附件目录，不写业务代码。
+v0.2 不是单纯文档骨架，已经包含 Gateway Core、policy、store、artifact detector、local simulator、OpeniLink event normalization、WeChat channel port，以及 pytest 覆盖。Feishu 和 Windows 只保留为后续目标。
 
 ## 3. 实施步骤
 
-### 阶段 1：状态与绑定
+### 阶段 1：状态与 alias
 
-实现 `BindingStore`：
+v0.2 使用 alias 模型替代 v0.1 的单一 `/bind` 叙述。owner 私聊命令：
 
-- 使用 SQLite。
-- 支持 upsert binding。
-- 支持按 `platform + chat_id + thread_key` 查询绑定。
-- 支持更新 `last_seen_session_head`。
-- 支持解除绑定。
+```text
+/add <alias> <session_id>
+/use <alias>
+/list
+/status [alias]
+```
 
-实现 `AttachmentStore`：
+`/add` 会读取 controller status，从 status 中提取 `cwd`、`workspace_root`、`project_root` 或 `default_cwd`，并保存 alias 的默认 workspace 与执行策略。普通私聊消息只发送到当前 active alias。
 
-- 保存附件元数据。
-- 将图片文件写入 `data/attachments/YYYY/MM/DD/`。
-- 文件名使用 `timestamp + message_id + hash`，避免重名。
+状态使用 SQLite 保存：
 
-### 阶段 2：MCP Client
+```text
+aliases
+active_contexts
+groups
+artifact_runs
+artifacts
+```
 
-实现 stdio JSON-RPC MCP client，不直接 import controller 内部类。
+### 阶段 2：Controller Client Boundary
 
-最低方法：
+v0.2 继续把 `cross-thread-controller` 视为边界，不直接 import controller 内部类。Gateway 需要的最小方法是：
 
 ```text
 status(session_id)
-start_run(session_id, cwd, message, owner, idempotency_key)
-send_followup(session_id, lock_token, expected_session_head, message)
-wait_result(run_id, after_seq)
-read_result(run_id)
-ack_close_release(run_id, session_id, lock_token)
+start_or_send(session_id, cwd, message, owner, policy, idempotency_key, expected_session_head)
 ```
 
-默认参数：
+私聊 work alias 使用：
 
 ```text
-intent=status_probe
-transport=app_server
-plan_capability=protocol
-sandbox=read-only
-approval_policy=never
-lease_seconds=300
+sandbox=workspace-write
+approval_policy=on-request
+writable_roots=(alias.default_cwd,)
 ```
 
-`delegated_execution` 不在 v1 默认路径中启用。
+群聊 QA session 使用：
+
+```text
+sandbox=read-only
+approval_policy=never
+writable_roots=()
+```
 
 ### 阶段 3：Gateway 命令处理
 
-实现统一消息对象：
+当前统一消息对象：
 
 ```text
 IncomingMessage
 - platform
-- chat_id
+- conversation_type
+- conversation_id
 - thread_key
-- message_id
 - sender_id
+- sender_role
 - text
-- images
-- created_at
+- attachments
+- raw_ref
 ```
 
-命令处理：
+私聊命令：
 
-- `/bind <session_id>`：读取真实 session head，保存绑定。
-- `/unbind`：删除当前聊天绑定。
-- `/status`：返回绑定信息和 controller session 状态。
-- `/refresh`：读取本地 Codex JSONL 的新增内容，不调用模型。
-- `/send <session_id> <message>`：临时发送，不改变当前绑定。
-- `/help`：返回命令说明。
+- `/add <alias> <session_id>`：添加 alias。
+- `/bind <session_id>`：兼容解析入口，非 v0.2 主路径。
+- `/use <alias>`：设置 active alias。
+- `/list`：列出 alias，不调用模型。
+- `/status [alias]`：读取 controller status，不调用模型。
+- `/refresh [alias]`：只读本地历史设计边界，不允许创建模型 turn。
+- `/artifacts [alias]`：列出最近一次 run 的 artifact 检测结果。
+- `/sendfile <artifact_id|all>`：只发送 allowed artifact。
+- `/group approve/list/status/reset/disable`：owner 私聊管理群 QA。
 
 普通消息：
 
-- 有绑定：发送到绑定 session。
-- 无绑定：提示先 `/bind <session_id>`。
+- owner 私聊有 active alias：发送到 alias 对应 session。
+- owner 私聊无 active alias：提示先 `/use <alias>`。
+- 群聊未 `@Bot`：忽略。
+- 群聊 `@Bot` 但未批准：记录 pending 并提示 owner 私聊批准。
+- 已批准群 `@Bot` 普通问题：发送到该群隔离 QA session。
+- 群聊 work/file/admin 命令：拒绝。
 
 ### 阶段 4：Local Adapter
 
-实现本地模拟入口，用来在不接飞书的情况下测试完整链路。
-
-建议形式：
+本地模拟入口用于在不接 OpeniLink 的情况下测试 Gateway 行为。本仓库是 src layout，安装后可运行：
 
 ```text
-python -m codex_thread_bridge.adapters.local --platform local --chat-id test
+python3 -m codex_thread_bridge.adapters.local --project-root /Users/clngs/Documents/CLngs_Vault/CodexThreadBridge
+```
+
+未安装时，在仓库根目录运行：
+
+```text
+PYTHONPATH=src python3 -m codex_thread_bridge.adapters.local --project-root /Users/clngs/Documents/CLngs_Vault/CodexThreadBridge
 ```
 
 交互行为：
 
 - 从 stdin 读消息。
 - 把消息转成 `IncomingMessage`。
+- 使用内置 EchoController 返回 `LOCAL: <message>`。
 - 打印 Gateway 返回内容。
 
-### 阶段 5：Feishu Adapter
+smoke：
 
-飞书 adapter 后续接入：
+```text
+/add code 019-code
+/use code
+请只回复 bridge smoke ok
+```
 
-- 接收飞书事件。
-- 把私聊、群消息、群 thread 统一映射为 `platform=feishu`。
-- `chat_id` 使用飞书会话 ID。
-- `thread_key` 优先使用飞书 thread/topic/root message；没有时使用 `chat_id`。
-- 结果以整段文本回发。
+### 阶段 5：OpeniLink / WeChat Adapter
 
-第一版不在飞书消息里暴露内部 traceback。
+v0.2 的微信入口是 OpeniLink Hub WebSocket inbound：
+
+```text
+OpeniLink Hub WebSocket inbound
+-> OpeniLink adapter normalize_openilink_event
+-> Gateway normalized IncomingMessage
+-> Gateway Core
+-> ChannelPort send_text/send_file
+```
+
+OpeniLink adapter 只做事件归一化和 channel port 包装。Gateway Core 不依赖 OpeniLink 内部实现。
+
+### 阶段 6：Feishu / Windows 后置
+
+飞书和 Windows 是 adapter targets，不是 v0.2 deliverables。后续接入时应复用当前 Gateway Core、policy、store、controller boundary 和 channel port 思路。
+
+Feishu 后续接入仍应遵守：不在群聊泄露 token、traceback 或敏感本地路径；状态类命令不创建模型 turn。
 
 ## 4. `/refresh` 设计
 
@@ -196,12 +256,12 @@ python -m codex_thread_bridge.adapters.local --platform local --chat-id test
 
 本地模拟：
 
-- `/bind 019...` 可以绑定已有 Codex session。
-- 已绑定后普通文本会进入目标 session。
-- 返回结果后 run 已 `delivery_ack`、`close`，session 已 `release`。
+- `/add code 019...` 可以添加已有 Codex session alias。
+- `/use code` 可以设置 active alias。
+- 已设置 active alias 后普通文本会进入目标 session。
 - `/status` 不产生 Codex turn。
 - `/refresh` 不产生 Codex turn。
-- `/unbind` 后普通消息不再发送到 Codex。
+- `/list` 不产生 Codex turn。
 
 安全：
 
@@ -209,26 +269,44 @@ python -m codex_thread_bridge.adapters.local --platform local --chat-id test
 - active lock 不被抢占。
 - `expected_session_head` 不一致时停止。
 - force recover 不可由普通消息隐式触发。
+- 群聊不能 dispatch work aliases。
+- 群聊不能 approve actions。
+- 群聊不能 reset itself。
+- 群聊不能 receive local files。
+- 群聊 QA 使用 read-only policy 和 `approval_policy=never`。
 
-图片：
+Artifact：
 
-- 图片保存到 `data/attachments/`。
-- 消息文本包含绝对本地路径。
-- 图片保存失败时不发送半成品消息。
+- 只检测存在的本地文件。
+- 文件必须在 allowed artifact roots 内。
+- 文件不能命中敏感路径 marker。
+- 文件不能早于 run start。
+- 文件不能超过大小限制。
+- 只向 owner 私聊发送 allowed artifact。
 
-飞书：
+微信 / OpeniLink：
 
-- 私聊可绑定。
-- 群 thread 可绑定。
+- OpeniLink event 可归一化为 `platform=wechat` 的 `IncomingMessage`。
+- 私聊 sender 命中 owner whitelist 时标记为 owner。
+- 群消息保持 `conversation_id` 和 `thread_key`。
+- ChannelPort 支持 reply/file sends。
+
+飞书后置：
+
+- 私聊可映射为 normalized private message。
+- 群 thread 可映射为 normalized group/thread message。
 - 返回结果不泄露 token、traceback 或敏感环境变量。
 
 ## 7. 验收标准
 
-MVP 通过条件：
+v0.2 通过条件：
 
-- 本地模拟 adapter 能完成绑定、发送、返回、释放锁的闭环。
-- 至少一个已有 Codex session 可被成功接入。
+- 本地模拟 adapter 能完成 `/add`、`/use`、普通消息、返回的闭环。
+- owner 私聊可以通过 alias 接入至少一个已有 Codex session。
+- 已批准微信群使用隔离 read-only QA session。
 - `/refresh` 可读取 App 侧手动新增内容，且不消耗模型额度。
-- 图片路径转发链路可用。
+- `/status`、`/list`、群状态命令不消耗模型额度。
+- Artifact gating 能区分 allowed/blocked，并只允许 owner 私聊发送。
 - 默认安全策略阻止非白名单用户。
-
+- OpeniLink boundary 可接收 normalized inbound，并通过 ChannelPort 回发文本或文件。
+- Feishu 和 Windows 不被当作 v0.2 完成交付项。
