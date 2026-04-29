@@ -14,6 +14,7 @@ from codex_thread_bridge.models import ExecutionPolicy
 DEFAULT_LEASE_SECONDS = 1800
 DEFAULT_TIMEOUT_MS = 30000
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
+TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled", "blocked"})
 INITIALIZE_PARAMS = {
     "protocolVersion": "2024-11-05",
     "capabilities": {},
@@ -339,7 +340,19 @@ class McpControllerClient:
             run_id = self._run_id(started)
 
             try:
-                lock_token = self._lock_token(started)
+                lock_token = self._lock_token_or_none(started)
+                if not lock_token:
+                    replay = self._terminal_replay_result(
+                        transport,
+                        started,
+                        run_id,
+                        result_session_id,
+                    )
+                    if replay is not None:
+                        return replay
+                    raise McpControllerClientError(
+                        "controller start result missing lock_token"
+                    )
                 result_session_id = self._session_id(started, session_id)
                 after_seq = self._last_event_seq(started)
 
@@ -367,28 +380,13 @@ class McpControllerClient:
                     "cross_thread_read_result",
                     {"run_id": run_id},
                 )
-                run = self._run(result)
-                result_session_id = self._first_str(
-                    run.get("session_id"),
-                    result.get("session_id"),
+                run_result = self._run_result_from_read_result(
+                    started,
+                    result,
                     result_session_id,
+                    run_id,
                 )
-                session_head = self._first_str(
-                    run.get("actual_session_head"),
-                    run.get("session_head"),
-                    result.get("session_head"),
-                    started.get("session_head"),
-                    "",
-                )
-                status = self._first_str(
-                    run.get("status"), started.get("status"), "unknown"
-                )
-                text = result.get("result_text")
-                if text is None:
-                    text = result.get("text", "")
-                if not isinstance(text, str):
-                    text = str(text)
-                approval_summary = self._approval_summary(run)
+                result_session_id = run_result.session_id
 
                 self._call_tool(
                     transport,
@@ -417,12 +415,12 @@ class McpControllerClient:
                 raise
 
             return ControllerRunResult(
-                run_id=run_id,
-                session_id=result_session_id,
-                session_head=session_head,
-                status=status,
-                text=text,
-                approval_summary=approval_summary,
+                run_id=run_result.run_id,
+                session_id=run_result.session_id,
+                session_head=run_result.session_head,
+                status=run_result.status,
+                text=run_result.text,
+                approval_summary=run_result.approval_summary,
             )
         finally:
             transport.close()
@@ -583,6 +581,12 @@ class McpControllerClient:
         return session_id
 
     def _lock_token(self, result: dict) -> str:
+        lock_token = self._lock_token_or_none(result)
+        if not lock_token:
+            raise McpControllerClientError("controller start result missing lock_token")
+        return lock_token
+
+    def _lock_token_or_none(self, result: dict) -> str:
         run = self._run(result)
         session = result.get("session")
         if not isinstance(session, dict):
@@ -592,9 +596,80 @@ class McpControllerClient:
             session.get("lock_token"),
             run.get("lock_token"),
         )
-        if not lock_token:
-            raise McpControllerClientError("controller start result missing lock_token")
         return lock_token
+
+    def _terminal_replay_result(
+        self,
+        transport: _JsonRpcTransport,
+        started: dict,
+        run_id: str,
+        fallback_session_id: Optional[str],
+    ) -> Optional[ControllerRunResult]:
+        status = self._run_status(started)
+        if status not in TERMINAL_RUN_STATUSES:
+            return None
+        result = self._call_tool(
+            transport,
+            "cross_thread_read_result",
+            {"run_id": run_id},
+        )
+        return self._run_result_from_read_result(
+            started,
+            result,
+            fallback_session_id,
+            run_id,
+        )
+
+    def _run_result_from_read_result(
+        self,
+        started: dict,
+        result: dict,
+        fallback_session_id: Optional[str],
+        run_id: str,
+    ) -> ControllerRunResult:
+        run = self._run(result)
+        session_id = self._first_str(
+            run.get("session_id"),
+            result.get("session_id"),
+            started.get("session_id"),
+            fallback_session_id,
+        )
+        session_head = self._first_str(
+            run.get("actual_session_head"),
+            run.get("session_head"),
+            result.get("session_head"),
+            started.get("session_head"),
+            "",
+        )
+        status = self._first_str(
+            run.get("status"),
+            result.get("status"),
+            self._run_status(started),
+            "unknown",
+        )
+        text = result.get("result_text")
+        if text is None:
+            text = result.get("text", "")
+        if not isinstance(text, str):
+            text = str(text)
+        if not text and status in {"failed", "cancelled"}:
+            text = (
+                "previous controller run %s is %s; send a new message to retry "
+                "this request."
+            ) % (run_id, status)
+        approval_summary = self._approval_summary(run)
+        return ControllerRunResult(
+            run_id=run_id,
+            session_id=session_id,
+            session_head=session_head,
+            status=status,
+            text=text,
+            approval_summary=approval_summary,
+        )
+
+    def _run_status(self, result: dict) -> str:
+        run = self._run(result)
+        return self._first_str(run.get("status"), result.get("status"))
 
     def _last_event_seq(self, result: dict) -> Optional[int]:
         run = self._run(result)

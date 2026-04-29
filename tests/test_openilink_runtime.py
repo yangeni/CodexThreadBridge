@@ -13,6 +13,7 @@ from codex_thread_bridge.adapters.openilink_runtime import (
     build_runtime_from_env,
     main,
 )
+from codex_thread_bridge.controller_client import McpControllerClientError
 from codex_thread_bridge.models import OutgoingMessage
 from codex_thread_bridge.stores import BridgeStore
 
@@ -137,6 +138,35 @@ def test_empty_gateway_reply_does_not_send_text_but_advances_cursor(tmp_path) ->
     assert client.sent == []
     assert store.get_runtime_state("ilink.cursor") == "cursor-2"
     assert store.get_runtime_state(_delivery_key("owner-1", "12345")) is None
+
+
+def test_controller_error_from_gateway_is_returned_without_stopping_runtime(tmp_path) -> None:
+    class FailingGateway:
+        def handle(self, msg):
+            raise McpControllerClientError("controller start result missing lock_token")
+
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    store.initialize()
+    client = FakeIlinkClient(_batch(_private_message()))
+    runtime = OpeniLinkRuntime(
+        client=client,
+        gateway=FailingGateway(),
+        store=store,
+        owner_user_ids={"owner-1"},
+    )
+
+    result = runtime.process_one_batch()
+
+    assert result.messages_seen == 1
+    assert result.replies_sent == 1
+    assert client.sent == [
+        (
+            "owner-1",
+            "Codex controller error: controller start result missing lock_token",
+        )
+    ]
+    assert store.get_runtime_state("ilink.cursor") == "cursor-2"
+    assert store.get_runtime_state(_processed_key("owner-1", "12345")) == "1"
 
 
 def test_send_exception_marks_delivery_unknown_without_replay(tmp_path) -> None:

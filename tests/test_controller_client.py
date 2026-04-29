@@ -454,6 +454,125 @@ def test_start_or_send_reads_lock_token_from_session_when_top_level_missing() ->
     }
 
 
+def test_start_or_send_returns_completed_idempotent_replay_without_lock_token() -> None:
+    transport = FakeTransport(
+        [
+            {"capabilities": {"tools": {}}},
+            tool_result(
+                {
+                    "run_id": "run-1",
+                    "session_id": "019-code",
+                    "status": "completed",
+                    "session_head": "head-2",
+                    "last_event_seq": 9,
+                    "run": {
+                        "run_id": "run-1",
+                        "session_id": "019-code",
+                        "status": "completed",
+                        "actual_session_head": "head-2",
+                        "delivery_ack_at": 1.0,
+                        "closed_at": 2.0,
+                    },
+                    "session": {
+                        "session_id": "019-code",
+                        "status": "released",
+                        "session_head": "head-2",
+                    },
+                }
+            ),
+            tool_result(
+                {
+                    "run": {
+                        "run_id": "run-1",
+                        "session_id": "019-code",
+                        "status": "completed",
+                        "actual_session_head": "head-2",
+                    },
+                    "result_text": "done from replay",
+                }
+            ),
+        ]
+    )
+    client = McpControllerClient(["fake-mcp"], transport_factory=lambda: transport)
+
+    result = client.start_or_send(
+        session_id="019-code",
+        cwd="/tmp/project",
+        message="hello",
+        owner="ctb-private:owner-1",
+        policy=ExecutionPolicy.work_default("/tmp/project"),
+        idempotency_key="m-1:code",
+        expected_session_head="head-1",
+    )
+
+    tool_calls = [
+        params["name"]
+        for method, params in transport.requests
+        if method == "tools/call"
+    ]
+    assert tool_calls == ["cross_thread_start", "cross_thread_read_result"]
+    assert result.run_id == "run-1"
+    assert result.session_id == "019-code"
+    assert result.session_head == "head-2"
+    assert result.status == "completed"
+    assert result.text == "done from replay"
+
+
+def test_start_or_send_reports_failed_idempotent_replay_without_lock_token() -> None:
+    transport = FakeTransport(
+        [
+            {"capabilities": {"tools": {}}},
+            tool_result(
+                {
+                    "run_id": "run-1",
+                    "session_id": "019-code",
+                    "status": "cancelled",
+                    "session_head": "head-2",
+                    "last_event_seq": 9,
+                    "run": {
+                        "run_id": "run-1",
+                        "session_id": "019-code",
+                        "status": "cancelled",
+                        "actual_session_head": "head-2",
+                        "delivery_ack_at": 1.0,
+                        "closed_at": 2.0,
+                    },
+                    "session": {
+                        "session_id": "019-code",
+                        "status": "released",
+                        "session_head": "head-2",
+                    },
+                }
+            ),
+            tool_result(
+                {
+                    "run": {
+                        "run_id": "run-1",
+                        "session_id": "019-code",
+                        "status": "cancelled",
+                        "actual_session_head": "head-2",
+                    },
+                    "result_text": "",
+                }
+            ),
+        ]
+    )
+    client = McpControllerClient(["fake-mcp"], transport_factory=lambda: transport)
+
+    result = client.start_or_send(
+        session_id="019-code",
+        cwd="/tmp/project",
+        message="hello",
+        owner="ctb-private:owner-1",
+        policy=ExecutionPolicy.work_default("/tmp/project"),
+        idempotency_key="m-1:code",
+        expected_session_head="head-1",
+    )
+
+    assert result.status == "cancelled"
+    assert "previous controller run run-1 is cancelled" in result.text
+
+
 def test_start_or_send_cleans_up_after_malformed_start_missing_new_session_id() -> None:
     transport = FakeTransport(
         [

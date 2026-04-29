@@ -107,9 +107,27 @@ class OpeniLinkRuntime:
                     reply_text = _GROUP_MANAGEMENT_DISABLED_REPLY
                 else:
                     msg = normalize_openilink_event(event.payload, self.owner_user_ids)
-                    reply = self.gateway.handle(msg)
-                    reply_text = reply.text
-                    reply_conversation_id = reply.conversation_id
+                    try:
+                        reply = self.gateway.handle(msg)
+                    except McpControllerClientError as exc:
+                        reply_text = "Codex controller error: %s" % _sanitize_error(
+                            exc,
+                            self.redacted_values,
+                        )
+                        self.store.record_event(
+                            "controller_error",
+                            {
+                                "conversation_id": event.context.conversation_id,
+                                "message_id": message_id,
+                                "reason": _sanitize_error(
+                                    exc,
+                                    self.redacted_values,
+                                ),
+                            },
+                        )
+                    else:
+                        reply_text = reply.text
+                        reply_conversation_id = reply.conversation_id
                 if reply_text:
                     self.store.set_runtime_state(outbox_key, reply_text)
 
