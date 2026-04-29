@@ -50,6 +50,10 @@ class OpeniLinkRuntime:
         delivery_failed = False
 
         for event in events:
+            message_id = str(event.payload["message_id"])
+            if self.store.get_runtime_state(_processed_message_key(message_id)):
+                continue
+
             self.client.remember_context(
                 event.context.conversation_id,
                 to_user_id=event.context.to_user_id,
@@ -60,11 +64,13 @@ class OpeniLinkRuntime:
                     "ignored_non_private_message",
                     {"conversation_id": event.context.conversation_id},
                 )
+                self._mark_message_processed(message_id)
                 continue
 
             msg = normalize_openilink_event(event.payload, self.owner_user_ids)
             reply = self.gateway.handle(msg)
             if not reply.text:
+                self._mark_message_processed(message_id)
                 continue
             try:
                 self.client.send_text(
@@ -81,6 +87,7 @@ class OpeniLinkRuntime:
                     },
                 )
                 break
+            self._mark_message_processed(message_id)
             replies_sent += 1
 
         new_cursor = str(batch.get("get_updates_buf") or cursor)
@@ -96,17 +103,31 @@ class OpeniLinkRuntime:
         self,
         poll_timeout_seconds: float,
         idle_sleep_seconds: float = 1.0,
+        max_batches: Optional[int] = None,
     ) -> None:
-        while True:
-            result = self.process_one_batch(timeout_seconds=poll_timeout_seconds)
-            if result.messages_seen == 0:
+        batches_seen = 0
+        while max_batches is None or batches_seen < max_batches:
+            try:
+                result = self.process_one_batch(timeout_seconds=poll_timeout_seconds)
+            except Exception as exc:
+                self.store.record_event(
+                    "runtime_error",
+                    {"reason": _sanitize_error(exc, self.redacted_values)},
+                )
                 time.sleep(idle_sleep_seconds)
+            else:
+                if result.messages_seen == 0:
+                    time.sleep(idle_sleep_seconds)
+            batches_seen += 1
 
     def _record_malformed_message(self, index: int, error: IlinkEventError) -> None:
         self.store.record_event(
             "malformed_ilink_message",
             {"index": index, "reason": _sanitize_error(error, self.redacted_values)},
         )
+
+    def _mark_message_processed(self, message_id: str) -> None:
+        self.store.set_runtime_state(_processed_message_key(message_id), "1")
 
 
 def build_runtime_from_env() -> OpeniLinkRuntime:
@@ -159,6 +180,10 @@ def _sanitize_error(exc: Exception, redacted_values: Iterable[str]) -> str:
     for value in redacted_values:
         text = text.replace(value, "[redacted]")
     return text[:300]
+
+
+def _processed_message_key(message_id: str) -> str:
+    return "ilink.processed.%s" % message_id
 
 
 if __name__ == "__main__":
